@@ -2,6 +2,7 @@ torch
 transformers
 peft
 torchao>=0.16.0
+jinja2
 datasets
 accelerate
 numpy
