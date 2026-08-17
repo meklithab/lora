@@ -1,0 +1,14 @@
+__pycache__/
+*.pyc
+.venv/
+venv/
+*.egg-info/
+.pytest_cache/
+.ipynb_checkpoints/
+
+# results are gitignored except .gitkeep placeholders
+results/*
+!results/.gitkeep
+!results/runs/
+results/runs/*
+!results/runs/.gitkeep
