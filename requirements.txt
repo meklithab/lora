@@ -1,6 +1,7 @@
 torch
 transformers
 peft
+torchao>=0.16.0
 datasets
 accelerate
 numpy

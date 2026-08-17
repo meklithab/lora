@@ -27,3 +27,14 @@
 
 **Gate**: pending -- awaiting the repo owner's Kaggle run of `scripts/preflight.py` and the resulting
 tier-1 GPU-hour projection before P1 starts.
+
+### P0 follow-up: torchao incompatibility on Kaggle (2026-08-17)
+
+First Kaggle run of `preflight.py` failed inside `get_peft_model()`: PEFT's LoRA layer dispatcher
+eagerly calls `is_torchao_available()` for every module (unrelated to whether we use torchao), and
+that function raises `ImportError` instead of returning `False` when it finds an incompatible
+version -- Kaggle's preinstalled `torchao==0.10.0` trips it, even though nothing in this repo touches
+torchao. Not a spec/invariant issue, a transitive dependency bug. Fixed by pinning `torchao>=0.16.0`
+in `requirements.txt` so `pip install -r requirements.txt` upgrades it; BUILD_SPEC.md §2's pin list
+doesn't mention torchao since we don't use it directly, so this is an addition, not a substitution.
+Model download, both dataset downloads, and GPU/CUDA detection all succeeded before this point.
