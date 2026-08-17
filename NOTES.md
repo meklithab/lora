@@ -42,3 +42,54 @@ torchao. Not a spec/invariant issue, a transitive dependency bug. Fixed by pinni
 in `requirements.txt` so `pip install -r requirements.txt` upgrades it; BUILD_SPEC.md §2's pin list
 doesn't mention torchao since we don't use it directly, so this is an addition, not a substitution.
 Model download, both dataset downloads, and GPU/CUDA detection all succeeded before this point.
+
+## P1 — Config, seeding, io_utils, data (2026-08-17)
+
+- Set up a local `.venv` (Python 3.13, CPU) to actually run `test_config.py` and `test_masking.py`
+  against real installed packages rather than just `py_compile` -- this phase's tests don't need a
+  GPU (tokenization only, no model forward pass), so it was worth doing properly rather than only
+  syntax-checking. `pyproject.toml` adds `pythonpath = ["src"]` so `import rankalloc` works without
+  an editable install.
+- `config.py`: frozen dataclasses (`RunConfig` + nested `DataConfig`/`ProbeConfig`/`AllocConfig`/
+  `ScalingConfig`/`OptimConfig`/`EvalConfig`), strict unknown-key rejection at every nesting level
+  (`ConfigError`, a `ValueError` subclass), dotted `--set key.path=value` overrides coerced from the
+  dataclass field's actual annotation (including `Optional[str]` unwrapping so `probe_id=none` ->
+  `None`), `run_id` = first 12 hex of `sha256(canonical_json(asdict(cfg)))`, `to_json`/`from_json`
+  round-trip. 12/12 tests green.
+- **Two numeric defaults in `OptimConfig` are provisional, not from the spec**: `lr=2e-4` and
+  `warmup_ratio=0.03`. BUILD_SPEC.md fixes LR across all conditions by design but never states the
+  actual value, and doesn't give a warmup ratio either -- both are common LoRA-SFT defaults, not
+  derived from anything in the spec. `max_grad_norm=1.0` and `max_steps=400` *are* spec'd exactly.
+  Flagging this because these two numbers matter for the real tier-1 grid (P5) and haven't been
+  confirmed by the repo owner -- they're overridable via `--set optim.lr=...` /
+  `--set optim.warmup_ratio=...` at grid-config time, so nothing is locked in, but the placeholder
+  values shouldn't be mistaken for spec'd choices.
+- Similarly, `ScalingConfig.fixed_alpha=32` (`alpha_ratio * budget_rank` at the tier-1 defaults) is a
+  provisional default for the `fixed_alpha` ablation mode's constant `alpha` -- BUILD_SPEC.md §4.5
+  names the mode but not a number.
+- `data.py`: `load_task(cfg: DataConfig, tokenizer) -> TaskBundle`. GSM8K uses the HF `train`/`test`
+  splits as two disjoint pools; `val_gen` (200) and `val_loss` (300) are both carved from a
+  `split_seed`-permuted `test` pool (200 first, 300 next, leaving most of the 1319-example test set
+  unused), `train` is a `split_seed`-permuted `train` pool. Disjointness is asserted at runtime via a
+  `"{split}:{index}"` key set, not assumed from the HF split boundary alone. Alpaca (probe-only, no
+  native test split) gets `val_loss=[]`, `val_gen=None`.
+- Response-only masking uses the prefix-length trick: tokenize the chat-template-formatted prompt
+  alone and the full prompt+response conversation, assert the full tokenization's prefix equals the
+  prompt tokenization exactly (would raise loudly on a tokenizer where BPE merges aren't
+  prefix-stable across that boundary -- didn't happen with Qwen2.5-Instruct's tokenizer), then mask
+  every label position covered by the prompt. 10/10 masking tests green against the real
+  `Qwen/Qwen2.5-0.5B-Instruct` tokenizer and real GSM8K data (not synthetic).
+- **Two missing transitive dependencies found running this for real, both added to
+  `requirements.txt`**: `jinja2` (required by `tokenizer.apply_chat_template`, not pulled in by a
+  base `pip install transformers`) and, from P0, `torchao>=0.16.0`. Neither is in BUILD_SPEC.md §2's
+  pin list since neither is something this repo uses directly -- both are additions to make the
+  pinned packages actually work, not substitutions for anything spec'd.
+- `seeding.py` and `io_utils.py` (atomic CSV append via temp+`os.replace`, `run_dir`,
+  `write_manifest`, `existing_run_ids`) are small and untested by a dedicated test file (§7 doesn't
+  list one) -- sanity-checked manually instead: `io_utils.atomic_append_csv` round-tripped correctly
+  in a scratch dir, and `seeding.set_seed` imports and runs cleanly after installing CPU-only
+  `torch==2.13.0+cpu` into the venv (real GPU seeding, i.e. `cuda.manual_seed_all`, still only
+  verified by the `torch.cuda.is_available()` guard -- no CUDA locally).
+
+**Gate**: `pytest` (config + masking) 22/22 green in the local venv. `git branch: feat/p1-config-data`,
+merges to `main` after this report.
