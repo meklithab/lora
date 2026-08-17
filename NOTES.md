@@ -25,8 +25,12 @@
   `project_tier1` docstring. Precise enough to gate the max_steps/8h decision, not precise to the
   minute.
 
-**Gate**: pending -- awaiting the repo owner's Kaggle run of `scripts/preflight.py` and the resulting
-tier-1 GPU-hour projection before P1 starts.
+**Gate**: PASSED. Kaggle run (Tesla T4, 15.6GB) after the torchao fix: micro-batch calibration
+settled on 4 (OOM at 8, peak VRAM ~10.3GB at batch 4), per-step time 626.5ms, tier-1 projection
+2.63 GPU-hours total (train 1.11h, probes 0.03h, eval-loss 0.30h, eval-gen 1.18h) -- well under the
+8h cutoff in BUILD_SPEC.md §8, so no `max_steps` or train-subset cut. `train.py` (P4) should use
+micro-batch 4 with no runtime headroom cut. `results/preflight.json` written on Kaggle (gitignored,
+not committed).
 
 ### P0 follow-up: torchao incompatibility on Kaggle (2026-08-17)
 
