@@ -135,3 +135,37 @@ merges to `main` after this report.
 **Gate**: PASSED locally -- `test_allocation.py` green, every invariant from §4.4/§7 asserted in code
 (spend-up/down legality gates, r_min/r_max clamps, the integrality-floor bound implicit in the
 algorithm's one-unit-at-a-time granularity) and covered by a test, not just implemented and hoped.
+
+## modeling.py + probe.py (2026-08-18)
+
+- Approved interpretation applied: `allocation.py` stays pure; `modeling.py` derives `alpha_pattern`
+  from `rank_pattern` + `scaling_mode` in `compute_alpha_pattern`, and `alloc_json_payload` merges it
+  with the `Allocation` when writing metadata to disk.
+- `rank_pattern`/`alpha_pattern` are fed to PEFT's `LoraConfig` keyed by the *pre-wrap* module names
+  (as discovered from the plain base model before `get_peft_model()` runs) -- confirmed empirically
+  that PEFT matches those during injection against the base tree it's wrapping, not the final tree.
+- **Real bug caught only by actually running this against the live Qwen2.5-0.5B model, not by
+  reasoning about the API**: `get_peft_model()` wraps every module under a `base_model.model.`
+  prefix, so a first version of `verify_live_model` (and `probe.py`'s `lora_B` lookup) walked the
+  *wrapped* model's `named_modules()` and compared those prefixed names directly against
+  `rank_pattern` -- silent zero matches, not a crash, would have looked like "verification found no
+  live LoRA layers" rather than "verification is comparing the wrong strings" if I hadn't printed and
+  inspected an actual live name. Fixed by stripping the confirmed `base_model.model.` prefix
+  (`modeling.PEFT_NAME_PREFIX`) before comparing, in both places. Documented as a docstring on
+  `verify_live_model`, not just fixed silently, since anyone extending this code will hit the same
+  trap.
+- Installed `peft` (plus a real download of `Qwen/Qwen2.5-0.5B-Instruct`) into the local venv and did
+  full CPU/fp32 smoke runs -- `discover_module_specs` finds all 168 real target Linear layers (24
+  layers x 7 projections); `verify_live_model` passes for both a uniform allocation
+  (`constant_ratio`, all ranks=16) and a skewed one (`fixed_alpha`, temperature=0.5, confirmed every
+  live alpha == the fixed constant); `run_probe` completes end-to-end for both `gsm8k` and `alpaca`,
+  writes valid JSON to `results/probe/<probe_id>.json`, and produces non-negative signal values for
+  all four keys (`rms`, `raw_norm`, `fisher`, `relative`) across all 168 modules. `scripts/run_probe.py`
+  CLI wired and smoke-tested end-to-end (`--device cpu`, tiny `probe.rank`/`probe.steps` overrides).
+- These were CPU/fp32/tiny-step smoke tests (per the CPU-vs-Kaggle split from the phase plan), not the
+  real fp16/CUDA/gradient-checkpointing/probe_steps=100 path -- that's the actual P3 gate, and it
+  needs a real GPU. Added `OptimConfig.micro_batch` (default 4) using the real value P0's preflight
+  calibrated on the T4, since both `run_probe.py` and the coming `train.py` need it.
+
+**Gate**: pending -- awaiting a Kaggle run of the real probe (both tasks, real `probe_steps`/`probe_rank`
+from config) and the live-model parameter verification at fp16/CUDA scale.

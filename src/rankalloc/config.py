@@ -60,6 +60,7 @@ class OptimConfig:
     max_steps: int = 400
     warmup_ratio: float = 0.03
     max_grad_norm: float = 1.0
+    micro_batch: int = 4  # calibrated on a real Tesla T4 in P0 preflight, see NOTES.md
 
 
 @dataclass(frozen=True)
