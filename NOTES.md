@@ -167,5 +167,16 @@ algorithm's one-unit-at-a-time granularity) and covered by a test, not just impl
   needs a real GPU. Added `OptimConfig.micro_batch` (default 4) using the real value P0's preflight
   calibrated on the T4, since both `run_probe.py` and the coming `train.py` need it.
 
-**Gate**: pending -- awaiting a Kaggle run of the real probe (both tasks, real `probe_steps`/`probe_rank`
-from config) and the live-model parameter verification at fp16/CUDA scale.
+**Gate**: PASSED. Kaggle (Tesla T4, fp16/CUDA, after re-running `pip install -r requirements.txt` --
+Kaggle sessions don't persist installed packages, this tripped the same torchao issue again on a
+fresh session, not a code regression): live-model verification for the uniform allocation matched
+exactly (`adapter_params_verified` total 8798208 == `alloc.params_total` 8798208). Both probes
+(`gsm8k`, `alpaca`) ran the real `probe_rank=8`/`probe_steps=100` and wrote valid JSON in ~40s and
+~36s respectively -- close to and under the ~108s (`2 x 100 steps`) P0 projected for both probes
+combined. One benign warning worth recording, not fixing: fp16 `GradScaler` occasionally skips
+`optimizer.step()` on an inf/nan-gradient step, but `probe.py` calls `scheduler.step()`
+unconditionally, producing PyTorch's standard "`lr_scheduler.step()` before `optimizer.step()`"
+warning. Harmless for the probe specifically -- the measured quantity is per-step gradient norms on
+`lora_B`, not schedule fidelity -- so not worth the added complexity of conditioning the scheduler
+step on scaler success for a diagnostic-only training loop. Would need addressing for real if it
+showed up in the main `train.py` loop (P4), where the LR schedule's shape actually matters.
