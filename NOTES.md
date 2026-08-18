@@ -93,3 +93,45 @@ Model download, both dataset downloads, and GPU/CUDA detection all succeeded bef
 
 **Gate**: `pytest` (config + masking) 22/22 green in the local venv. `git branch: feat/p1-config-data`,
 merges to `main` after this report.
+
+## P2 — allocation.py + full test file (2026-08-18)
+
+- Pure logic, no model/GPU dependency -- fully built and tested locally.
+- `solve_allocation`: sharpen (`v ** (1/temperature)`, renormalise) -> floor+clamp -> spend-up
+  (largest static remainder first, gated on `r_m < r_max` and `c_m <= B - spent`) -> spend-down
+  (smallest static remainder first, gated on `r_m > r_min`), tie-broken on module name in both
+  directions. "Static remainder" means the fractional part of the *ideal* (pre-clamp) rank, computed
+  once from the weights and never recomputed mid-loop -- re-reading §4.4, this reads as the intended
+  design (a single largest-remainder-method pass, not a greedy re-optimization), and it's what makes
+  the solver deterministic and cheap to reason about.
+- Worked out *why* spend-down is ever needed, since flooring alone can only ever undershoot the
+  budget (`floor(x) <= x`, and normalized weights sum to 1, so `sum(floor(ideal_m)) * c_m <= B`
+  always): the `r_min` clamp is the only thing that can push spend *above* budget -- when many
+  modules get floored to 0 rank (e.g. under the extreme-weight test, one module at weight 0.999),
+  clamping them all up to `r_min=1` can overshoot. Spend-down existing to claw that back. Documented
+  as a comment-worthy invariant, not just implemented blind.
+- `strategy_weights` implements all six strategies from the table in §4.4, including the two tier-2
+  ones (`early_heavy`/`late_heavy`) since they're cheap and the code path is shared. `random` sorts
+  module names before drawing from `np.random.default_rng(seed).dirichlet(...)` specifically so the
+  strategy is permutation-invariant in the *module list* the caller passes in, matching the
+  permutation-invariance requirement for `solve_allocation` itself.
+- `alpha_pattern` is **not** produced by this module, despite §4.4's alloc.json field list including
+  it. Scaling mode (`constant_ratio`/`rslora`/`fixed_alpha`) is entirely a P3 `modeling.py` concern
+  (§4.5) that `allocation.py` has no business knowing about -- P3 will compute `alpha_pattern` from
+  `Allocation.rank_pattern` and merge it in when actually writing `alloc.json` to disk. Flagging this
+  now in case the intent was for allocation.py to own it; I read the module boundary as: allocation.py
+  solves the *rank* budget problem, modeling.py turns ranks into a live LoRA config (rank + alpha
+  together).
+- One implementation bug I introduced and caught via the test suite, not the other way around: my
+  first draft of the temperature tests asserted near-equal *ranks* at high temperature and heavy
+  *rank* concentration at low temperature. Both were wrong tests, not wrong code -- temperature acts
+  on the normalized *weight*, and rank still varies by module cost `c_m` even under perfectly uniform
+  weight (that's the whole point of I1). Fixed the tests to check `normalized_weight` convergence at
+  high temperature and rank concentration under a controlled 2x-skewed weight pair at low
+  temperature; both pass now. Worth remembering when eyeballing real probe-derived allocations later.
+- 217/217 allocation tests green (property test runs 200 random weight vectors as
+  `pytest.mark.parametrize`, per §7). Full suite (config + masking + allocation): 239/239.
+
+**Gate**: PASSED locally -- `test_allocation.py` green, every invariant from §4.4/§7 asserted in code
+(spend-up/down legality gates, r_min/r_max clamps, the integrality-floor bound implicit in the
+algorithm's one-unit-at-a-time granularity) and covered by a test, not just implemented and hoped.
