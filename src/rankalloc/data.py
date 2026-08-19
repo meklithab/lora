@@ -9,8 +9,9 @@ a loud AssertionError, not silently-wrong labels.
 """
 import dataclasses
 from dataclasses import dataclass
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
+import torch
 from datasets import load_dataset
 
 from rankalloc.config import DataConfig
@@ -208,3 +209,33 @@ def load_task(cfg: DataConfig, tokenizer) -> TaskBundle:
     if cfg.task == "alpaca":
         return _load_alpaca(cfg, tokenizer)
     raise ValueError(f"Unknown task: {cfg.task!r}")
+
+
+def collate_batch(examples: List[TokenizedExample], pad_token_id: int, device) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Right-pad a batch of TokenizedExample for training/held-out-loss eval."""
+    max_len = max(len(ex.input_ids) for ex in examples)
+    input_ids, labels, attention_mask = [], [], []
+    for ex in examples:
+        pad = max_len - len(ex.input_ids)
+        input_ids.append(ex.input_ids + [pad_token_id] * pad)
+        labels.append(ex.labels + [IGNORE_INDEX] * pad)
+        attention_mask.append(ex.attention_mask + [0] * pad)
+    return (
+        torch.tensor(input_ids, device=device),
+        torch.tensor(labels, device=device),
+        torch.tensor(attention_mask, device=device),
+    )
+
+
+def collate_gen_batch(examples: List[GenExample], pad_token_id: int, device) -> Tuple[torch.Tensor, torch.Tensor]:
+    """Left-pad a batch of GenExample for batched greedy generation (BUILD_SPEC.md §4.7)."""
+    max_len = max(len(ex.prompt_input_ids) for ex in examples)
+    input_ids, attention_mask = [], []
+    for ex in examples:
+        pad = max_len - len(ex.prompt_input_ids)
+        input_ids.append([pad_token_id] * pad + ex.prompt_input_ids)
+        attention_mask.append([0] * pad + [1] * len(ex.prompt_input_ids))
+    return (
+        torch.tensor(input_ids, device=device),
+        torch.tensor(attention_mask, device=device),
+    )

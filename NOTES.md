@@ -167,6 +167,8 @@ algorithm's one-unit-at-a-time granularity) and covered by a test, not just impl
   needs a real GPU. Added `OptimConfig.micro_batch` (default 4) using the real value P0's preflight
   calibrated on the T4, since both `run_probe.py` and the coming `train.py` need it.
 
+## modeling.py + probe.py Kaggle gate confirmation (2026-08-18)
+
 **Gate**: PASSED. Kaggle (Tesla T4, fp16/CUDA, after re-running `pip install -r requirements.txt` --
 Kaggle sessions don't persist installed packages, this tripped the same torchao issue again on a
 fresh session, not a code regression): live-model verification for the uniform allocation matched
@@ -179,4 +181,40 @@ unconditionally, producing PyTorch's standard "`lr_scheduler.step()` before `opt
 warning. Harmless for the probe specifically -- the measured quantity is per-step gradient norms on
 `lora_B`, not schedule fidelity -- so not worth the added complexity of conditioning the scheduler
 step on scaler success for a diagnostic-only training loop. Would need addressing for real if it
-showed up in the main `train.py` loop (P4), where the LR schedule's shape actually matters.
+showed up in the main `train.py` loop, where the LR schedule's shape actually matters.
+
+## train.py + evaluate.py + run_single.py (2026-08-20)
+
+- `train.py`: hand-written loop, fixed-step budget (I3), AdamW + cosine warmup, fp16 `GradScaler`.
+  Properly guards the LR-scheduler-vs-optimizer-skip race this time (unlike `probe.py`, documented
+  as intentionally not worth it there): tracks `scaler.get_scale()` before/after `scaler.step()` and
+  only advances the scheduler when the optimizer actually stepped, since here the schedule shape is a
+  real result, not just probe diagnostics. `step_log.jsonl` gets per-step cumulative GPU seconds via
+  a `torch.cuda.Event` recorded every step (not just start/end) -- costs a sync per step, judged
+  worth it for exact logging given the generous 2.63h tier-1 budget from P0. OOM caught internally
+  and returned as `status="oom"` rather than raised, so a real run can fail one condition without
+  taking down the whole grid (run_grid.py's job, not this module's, to keep going after that).
+- `evaluate.py`: `loss_token_weighted`/`loss_example_mean` computed manually from logits (not
+  `out.loss`) specifically so both per-token and per-example breakdowns are available from one
+  forward pass. GSM8K `extract_strict`/`extract_flexible` + `Fraction`-based comparison, 15 new unit
+  tests (`test_evaluate.py`, pure logic, no GPU) covering comma/currency/percent/decimal
+  normalization and both extractors -- not in §7's list but cheap and worth having given how easy
+  this kind of parsing is to get subtly wrong.
+- `run_single.py` wires the whole pipeline (allocation -> model build -> live verification -> alloc.json
+  -> training with periodic held-out-loss curve -> final held-out loss -> generation eval ->
+  `results.csv` row + `metrics.json` + `samples.jsonl` + adapter-only save) and handles `strategy=
+  "zero_shot"` as a distinct eval-only branch (no allocation, no LoRA, just the untuned base model),
+  matching the tier-1 grid's eval-only condition.
+- Full local smoke coverage on CPU (fp32, `--smoke`: 20 steps, 8 eval examples, `budget_rank=4`,
+  `max_new_tokens=16` to keep it fast) for **both** branches: the trained path (`strategy=uniform`)
+  and the `zero_shot` path. Both wrote complete run directories (`alloc.json`, `step_log.jsonl`,
+  `held_out_loss_curve.json`, `samples.jsonl`, `metrics.json`, adapter-only checkpoint for the trained
+  run) and correct `results.csv` rows, verified by inspection: `adapter_params_verified=True`,
+  `budget_abs_error=0`, and directionally sane losses (zero_shot held-out loss 0.93 > trained
+  held-out loss 0.59, i.e. 20 steps of training measurably helped, as expected). Full suite still
+  254/254 green (239 prior + 15 new evaluate tests).
+- These smoke runs are CPU/fp32/tiny-scale correctness checks only, not the timed gate. The actual
+  §4.6 requirement -- `run_single.py --smoke` under 3 minutes -- needs the real fp16/CUDA path and
+  can only be measured on Kaggle.
+
+**Gate**: pending -- awaiting a Kaggle timed run of `run_single.py --smoke`.

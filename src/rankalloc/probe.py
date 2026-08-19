@@ -17,7 +17,7 @@ import torch
 from transformers import AutoTokenizer, get_cosine_schedule_with_warmup
 
 from rankalloc.config import DataConfig
-from rankalloc.data import load_task
+from rankalloc.data import collate_batch, load_task
 from rankalloc.modeling import (
     DEFAULT_TARGET_MODULES,
     PEFT_NAME_PREFIX,
@@ -53,21 +53,6 @@ def compute_probe_id(model_name: str, task: str, rank: int, steps: int, seed: in
 
 def _proj_type(module_name: str) -> str:
     return module_name.rsplit(".", 1)[-1]
-
-
-def _collate(examples, pad_token_id: int, device):
-    max_len = max(len(ex.input_ids) for ex in examples)
-    input_ids, labels, attention_mask = [], [], []
-    for ex in examples:
-        pad = max_len - len(ex.input_ids)
-        input_ids.append(ex.input_ids + [pad_token_id] * pad)
-        labels.append(ex.labels + [-100] * pad)
-        attention_mask.append(ex.attention_mask + [0] * pad)
-    return (
-        torch.tensor(input_ids, device=device),
-        torch.tensor(labels, device=device),
-        torch.tensor(attention_mask, device=device),
-    )
 
 
 def run_probe(
@@ -150,7 +135,7 @@ def run_probe(
 
     for step in range(steps):
         batch_examples = [examples[(step * micro_batch + i) % n_examples] for i in range(micro_batch)]
-        input_ids, labels, attention_mask = _collate(batch_examples, tokenizer.pad_token_id, device)
+        input_ids, labels, attention_mask = collate_batch(batch_examples, tokenizer.pad_token_id, device)
 
         optimizer.zero_grad(set_to_none=True)
         if use_amp:
