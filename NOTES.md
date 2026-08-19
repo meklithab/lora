@@ -217,4 +217,10 @@ showed up in the main `train.py` loop, where the LR schedule's shape actually ma
   §4.6 requirement -- `run_single.py --smoke` under 3 minutes -- needs the real fp16/CUDA path and
   can only be measured on Kaggle.
 
-**Gate**: pending -- awaiting a Kaggle timed run of `run_single.py --smoke`.
+**Gate**: PASSED. Kaggle (Tesla T4, fp16/CUDA): `run_single.py --smoke` finished in 1m49.979s wall
+(well under the 3-minute cap), `train_gpu_seconds=11.38` for 20 steps, `eval_gpu_seconds=28.34` for
+held-out loss + 8-example generation eval, `peak_vram_mb=4557` (well within the T4's 16GB),
+`adapter_params_verified=true`, `budget_abs_error=0`. `gsm8k_strict`/`gsm8k_flexible` both 0.375 (3/8)
+-- directionally sane for 20 smoke-scale steps, not a claim about real performance. Full run
+directory written correctly. Both code paths (trained + `zero_shot`) now confirmed working on real
+fp16/CUDA, not just CPU smoke.
