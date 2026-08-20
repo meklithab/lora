@@ -289,3 +289,22 @@ sessions, not just within one process), all 17 condition-runs listed correctly, 
 GPU-hours for the pending work -- consistent with `preflight.py`'s own 2.64h tier-1 projection (both
 use the same coarse eval-time multiplier methodology), well under the 8h cutoff. Every piece of P5
 now confirmed against the real environment, not just local synthetic data.
+
+## README (2026-08-20)
+
+- Quickstart leads with the Kaggle "Internet on" caveat per §2, since that's the single most common
+  first-run failure and it's easy to bury in a longer doc.
+- Every command in the README is one already run for real somewhere in this log (preflight, smoke,
+  probe, single-condition, grid `--dry_run`/real, analyze, make_figures, pytest) -- nothing here is
+  speculative or untested.
+- Definition-of-done section maps each §8 checklist item to the exact command that verifies it,
+  including the two that are automatic/structural rather than something you eyeball: budget error
+  via a one-line pandas read of `results.csv`, and parameter verification via the `assert` already
+  inside `run_single.py` (it fails the run loudly, not silently, if it's ever wrong).
+- Full suite re-run one final time before this commit: 265/265 green.
+
+**Gate**: `pytest -q` 265/265 green (final check, no GPU needed for the suite itself). README covers
+every command needed to reproduce every number and figure. The real tier-1/tier-2 grid runs
+themselves haven't been executed yet -- that's the repo owner's call on timing, not part of this
+build's phase gates, and `results/` is deliberately gitignored so no partial/fake experiment data
+ships in the repo.
