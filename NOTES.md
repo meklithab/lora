@@ -399,3 +399,30 @@ as intended.
 
 **Gate**: N/A (bugfix, not a phase). `pytest -q` 265/265 green; fix verified against real pasted
 results before pushing, not just synthetic data.
+
+## Second analyze.py bug: blanket MDE ignored unequal seed counts (2026-08-20)
+
+- Repo owner asked directly whether the unequal seed counts tier 1 uses by design (`uniform`/
+  `gradnorm_prop` at 5 seeds, `gradnorm_inverse`/`random` at 3, per §6) affect the read -- a sharp
+  question that exposed a second real bug: `analyze_metric` computed one `minimum_detectable_effect`
+  using `n_uniform` (5) and applied it to every comparison, including the 3-seed ones. A 3-seed
+  comparison has a coarser true detection threshold than a 5-seed one; using the 5-seed MDE for it
+  understated how much noise there could be.
+- Recomputed with the correct per-comparison n: `random`'s "worse than uniform" call (delta 0.00082
+  vs the wrong blanket MDE 0.000663) does not survive against its own correct 3-seed MDE (0.000996)
+  -- delta < MDE, so it's noise, not a real effect. `gradnorm_prop` (n=5, already used the right MDE)
+  and `gradnorm_inverse` (delta 0.00131 vs correct MDE 0.000996) both still hold up as reliably worse
+  than uniform.
+- Fixed by moving MDE computation into `compare_to_uniform` itself, using each comparison's own
+  `paired_delta` result's `n` (already correctly reflects only the matched seed pairs) against the
+  shared noise-floor sigma. `interpretation()` now reads each comparison's own MDE instead of a single
+  blanket value passed in. Verified against the real numbers again before pushing (random correctly
+  flips from "worse" to "noise"; the interpretation string correctly falls into the "mixed directions"
+  branch instead of overclaiming "uniform beats everything"). Full suite: 265/265 still green.
+- Revised headline: `gradnorm_prop` and `gradnorm_inverse` are both reliably worse than uniform;
+  `random` is not distinguishable from noise at n=3. Still not the hypothesis's direction, but weaker
+  and more honest than "uniform beats every alternative tested" -- worth remembering that `random`'s
+  own MDE is coarse specifically because of the 3-seed control-arm design, not because there's
+  necessarily nothing there.
+
+**Gate**: N/A (bugfix, not a phase). `pytest -q` 265/265 green.
