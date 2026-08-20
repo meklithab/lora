@@ -353,6 +353,49 @@ ships in the repo.
 - Full suite: 265/265 still green. Regression-checked the CPU probe path specifically (unaffected,
   since there's no scaler-skip concept without real fp16 -- `valid_steps == steps` there always).
 
-**Gate**: pending -- awaiting a Kaggle re-run of the real tier-1 grid (after deleting the stale
-cached gsm8k probe JSON) to confirm the fix actually resolves the failure against real fp16 overflow
-behavior, not just in theory.
+**Gate**: PASSED. Repo owner deleted the stale probe (twice -- first deleted the wrong files,
+`results/runs/<run_id>/` instead of `results/probe/<probe_id>.json`, easy mix-up since both are
+12-hex-char names; the second attempt hit the exact stale-cache failure predicted, confirmed by the
+new clear error message from the `solve_allocation` defensive check rather than a cryptic
+`math.floor` crash -- a real, useful signal that the guard is working) and re-ran the real tier-1
+grid on Kaggle. All 17 condition-runs succeeded this time, including all 8 `gradnorm_prop`/
+`gradnorm_inverse` runs that failed before the fix. The retry-after-failure fix also confirmed
+correct in the wild: the 9 already-`ok` rows were skipped, the 8 `failed` rows were retried, exactly
+as intended.
+
+## Real tier-1 result and a second analyze.py bug (2026-08-20)
+
+- With the full tier-1 grid now complete, the repo owner ran `scripts/analyze.py` for real and asked
+  me to walk through what it meant. Reading the actual numbers: on `loss_token_weighted` (primary
+  metric), all three non-uniform strategies are **reliably worse than uniform**, each clearing the
+  MDE (0.000663) in the bad direction -- `random` +0.00082 (1.2x MDE), `gradnorm_inverse` +0.00131
+  (2.0x MDE), `gradnorm_prop` +0.00268 (**4.0x MDE**, the worst of the three). Cliff's delta is 1.0
+  for both gradnorm arms vs uniform: complete separation, every seed pair worse, not just the mean.
+  `gradnorm_prop` -- the hypothesis arm -- is the worst performer of all, worse than its own
+  directional control (`gradnorm_inverse`). On `gsm8k_flexible` (secondary), none of the deltas clear
+  that metric's much larger MDE (0.0389), so "doesn't matter at this scale" is the correct read there.
+- **`analyze.py`'s `interpretation` printed "allocation doesn't matter at this scale" for the loss
+  metric too, which was wrong** -- a real bug I found by actually reading the numbers against the
+  label, not by re-deriving the whole pipeline. `_beats_uniform` only tested "does this strategy beat
+  uniform" (a boolean), so "reliably worse than uniform beyond the MDE" and "no detectable effect
+  either way" collapsed into the same negative case and got the same label. Those are different
+  findings -- a clean negative result (everything tested is worse than the baseline, consistently) is
+  not the same as a null result (nothing detectable in either direction), and BUILD_SPEC.md's
+  four-outcome table doesn't name the "uniform wins outright" case at all.
+- Fixed by replacing `_beats_uniform` (bool) with `_direction` (`"better"`/`"worse"`/`"noise"`,
+  MDE-gated in both directions), and adding a fifth interpretation branch ahead of the four spec'd
+  ones: all three controls `"worse"` -> explicit "uniform beats every non-uniform strategy tested...
+  this is a real negative result, not 'allocation doesn't matter'". Verified directly against the
+  repo owner's actual pasted numbers before committing (reconstructed the `comparisons` dict, called
+  `interpretation()` locally, confirmed it now prints the corrected read for both metrics). Full
+  suite: 265/265 still green.
+- Take the tier-1 headline as it now stands: **uniform allocation beat every alternative tested on
+  held-out loss**, and the more directed the reallocation (prop > inverse > random, in order of how
+  much worse each got), the worse it performed -- the opposite of the hypothesis. Worth investigating
+  *why* before writing this up -- candidates worth checking: whether 400 steps is enough for
+  reallocated capacity to pay off, whether `budget_rank=16` leaves too little room for reallocation to
+  matter, or something about the `rms` probe signal itself -- but that investigation is the repo
+  owner's call, not something to guess at here.
+
+**Gate**: N/A (bugfix, not a phase). `pytest -q` 265/265 green; fix verified against real pasted
+results before pushing, not just synthetic data.

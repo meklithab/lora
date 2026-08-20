@@ -43,38 +43,59 @@ def compare_to_uniform(df: pd.DataFrame, strategy: str, metric: str) -> dict:
     }
 
 
-def _beats_uniform(delta, mde, lower_is_better):
+def _direction(delta, mde, lower_is_better):
+    """'better' / 'worse' / 'noise' relative to uniform, gated on the MDE -- not just "does it beat
+    uniform": a strategy can be reliably *worse* than uniform (beyond the noise floor, wrong
+    direction), which is a distinct, reportable finding from "no detectable effect either way". The
+    original two-state (beats-uniform yes/no) version of this function collapsed both into the same
+    "doesn't matter" label, which is wrong -- a clean negative result isn't a null result.
+    """
     if delta is None or mde is None or pd.isna(delta) or pd.isna(mde):
         return None
     improvement = -delta if lower_is_better else delta
-    return improvement > mde
+    if improvement > mde:
+        return "better"
+    if improvement < -mde:
+        return "worse"
+    return "noise"
 
 
 def interpretation(comparisons: dict, mde: float, lower_is_better: bool) -> str:
-    """BUILD_SPEC.md §4.4's four-outcome table. With n<=5 seeds this is a coarse mean-delta-vs-MDE
-    read, not a statistical test -- this pipeline deliberately computes no significance tests
-    anywhere (§4.8); a human should read the raw `comparisons` alongside this label, not trust it
-    blindly.
+    """BUILD_SPEC.md §4.4's four-outcome table, extended with a fifth outcome the table doesn't name:
+    every non-uniform strategy reliably *worse* than uniform. With n<=5 seeds this is a coarse
+    mean-delta-vs-MDE read, not a statistical test -- this pipeline deliberately computes no
+    significance tests anywhere (§4.8); a human should read the raw `comparisons` alongside this
+    label, not trust it blindly.
     """
-    flags = {}
+    directions = {}
     for strat in CONTROL_STRATEGIES:
         cmp = comparisons.get(strat)
         if cmp is None:
             return f"insufficient conditions to interpret (missing {strat} vs uniform)"
-        flags[strat] = _beats_uniform(cmp["mean_delta_vs_uniform"], mde, lower_is_better)
-    if any(v is None for v in flags.values()):
+        directions[strat] = _direction(cmp["mean_delta_vs_uniform"], mde, lower_is_better)
+    if any(v is None for v in directions.values()):
         return "insufficient uniform seeds for an MDE-gated read"
 
-    prop, inverse, random_ = flags["gradnorm_prop"], flags["gradnorm_inverse"], flags["random"]
-    if not (prop or inverse or random_):
+    prop, inverse, random_ = directions["gradnorm_prop"], directions["gradnorm_inverse"], directions["random"]
+
+    if prop == "worse" and inverse == "worse" and random_ == "worse":
+        return (
+            f"uniform beats every non-uniform strategy tested, beyond the MDE (MDE={mde:.4g}) -- "
+            "non-uniform allocation is actively worse here, not neutral; this is a real negative "
+            "result, not 'allocation doesn't matter'"
+        )
+    if prop == "noise" and inverse == "noise" and random_ == "noise":
         return f"prop ~ inverse ~ random ~ uniform: allocation doesn't matter at this scale (MDE={mde:.4g})"
-    if prop and inverse and random_:
+    if prop == "better" and inverse == "better" and random_ == "better":
         return "prop ~ inverse ~ random > uniform: non-uniformity itself helps; the gradient signal is irrelevant"
-    if prop and inverse and not random_:
+    if prop == "better" and inverse == "better" and random_ != "better":
         return "prop ~ inverse > random: the signal identifies *something*, but direction doesn't matter -- suspect a width/position correlate"
-    if prop and not inverse:
+    if prop == "better" and inverse != "better":
         return "prop > random > inverse: the gradient signal is informative AND directional -- the strong result"
-    return "no clean match to the four canonical outcomes -- inspect the raw per-strategy deltas"
+    return (
+        f"mixed directions (prop={prop}, inverse={inverse}, random={random_}) -- no clean match to a "
+        "canonical outcome, inspect the raw per-strategy deltas"
+    )
 
 
 def analyze_metric(df: pd.DataFrame, metric: str) -> dict:
