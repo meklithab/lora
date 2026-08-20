@@ -1,0 +1,26 @@
+# Tier 2 -- depth, only if >=12h remain after tier 1. Each arm is independent; run in this order.
+# BUILD_SPEC.md §6. The AdaLoRA reference arm is deliberately NOT included here: it's a
+# non-parameter-matched reference that needs its own handling outside run_single.py's
+# parameter-matched pipeline, and the spec explicitly marks it as the most droppable item.
+budget_rank: 16
+scaling_mode: constant_ratio
+signal: rms
+max_steps: 400
+conditions:
+  - strategy: gradnorm_prop     # the scaling-trap result
+    n_seeds: 3
+    scaling_mode: fixed_alpha
+  - strategy: gradnorm_prop     # the width-confound result
+    n_seeds: 3
+    signal: raw_norm
+  - strategy: early_heavy
+    n_seeds: 3
+  - strategy: late_heavy
+    n_seeds: 3
+  - strategy: gradnorm_prop
+    n_seeds: 3
+    scaling_mode: rslora
+  - strategy: gradnorm_prop
+    n_seeds: 3
+    temperature: [0.5, 2.0]
+probes: []

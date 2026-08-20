@@ -224,3 +224,66 @@ held-out loss + 8-example generation eval, `peak_vram_mb=4557` (well within the 
 -- directionally sane for 20 smoke-scale steps, not a claim about real performance. Full run
 directory written correctly. Both code paths (trained + `zero_shot`) now confirmed working on real
 fp16/CUDA, not just CPU smoke.
+
+## metrics.py, run_grid.py, analyze.py, make_figures.py, configs/*.yaml (2026-08-20)
+
+- `metrics.py` (§4.8, not assigned to an earlier phase but a prerequisite for `analyze.py`, so built
+  here): `paired_delta`, `pooled_sd`, `minimum_detectable_effect`, `hedges_g`, `cliffs_delta`. No
+  significance tests anywhere, by design. 11 new unit tests, all local/pure, including a known-value
+  check on `pooled_sd` and monotonicity checks on the MDE formula.
+- `configs/base.yaml`, `grid_tier1.yaml`, `grid_tier2.yaml` created (§3 lists them but no earlier
+  phase built them). Tier 1 matches §6 exactly: 16 training runs + 1 eval-only (`zero_shot`) + 2
+  probes. Tier 2 matches §6's six arms in order; the AdaLoRA reference arm is deliberately **not**
+  included as a grid entry -- it needs non-parameter-matched handling `run_single.py`'s pipeline
+  doesn't support, and the spec explicitly calls it the most droppable item.
+- `run_grid.py`: each run executes as an isolated `run_single.py`/`run_probe.py` subprocess rather
+  than in-process, specifically so 16+ sequential model loads don't accumulate CUDA memory
+  fragmentation in one long-lived process, and so a crash in one run can't corrupt state for the
+  next. `results.csv` itself is written by `run_single.py`'s own atomic append; `run_grid.py` only
+  decides what to run/skip (via `run_id`, computed identically without needing to execute anything)
+  and writes a synthetic `status=failed` row only if a subprocess dies before writing its own.
+  `--dry_run` needs zero GPU work (no model ever loads -- `run_id`/`probe_id` are pure hashes of the
+  resolved config), so it's fully verifiable locally.
+- Grid-level `temperature: [0.5, 2.0]`-style list overrides (tier 2's temperature sweep) expand via
+  `itertools.product` over any list-valued per-condition key, multiplied by `n_seeds` -- generic
+  enough for the one sweep the spec actually uses, not built out further than that.
+- Probe scheduling: any grid whose conditions include `gradnorm_prop`/`gradnorm_inverse` gets the
+  GSM8K probe auto-added to the run list even if the grid's own `probes:` field omits it (tier 2's
+  `probes: []`, since it wants to *reuse* tier 1's already-cached probe, not re-run it) --
+  `probe_id` is a pure hash of `(model_name, task, rank, steps, seed=0, split_seed)`, so tier 2 and
+  tier 1 independently compute the identical id from the same `base.yaml` and the cache hits. Only
+  the GSM8K probe drives allocation; the Alpaca probe exists purely for Figure 1's diagnostic
+  comparison and feeds no strategy.
+- **Resume/SIGKILL verified for real, locally, not simulated**: built a tiny throwaway grid (3
+  strategies x a few seeds, 5 steps, CPU) outside the repo, launched `run_grid.py` as a real
+  background process, and sent it a genuine `kill -9` mid-grid (confirmed via `ps` that the target
+  PID was alive at kill time, and that it was actively past the first couple of runs). Restarting
+  with the identical grid produced **zero duplicate `run_id`s and zero lost rows** -- every run
+  from both before and after the kill ended up in `results.csv` exactly once. This is a
+  process/file-integrity property, not a GPU-numerics one, so local CPU verification is a genuine
+  test of the real mechanism, not a stand-in for one.
+- `analyze.py`: paired deltas + MDE-gated read of BUILD_SPEC.md §4.4's four-outcome interpretation
+  table, computed per metric (`loss_token_weighted`, lower-is-better; `gsm8k_flexible`,
+  higher-is-better) via a `LOWER_IS_BETTER` sign flag. Explicitly documented as a coarse read to
+  pair with the raw `comparisons` dict, not a verdict to trust blindly -- BUILD_SPEC.md §4.8 is
+  clear that this pipeline computes no significance tests anywhere, and n<=5 seeds means the
+  MDE-gated label is a starting point for a human reading the real numbers, not the final word.
+  Smoke-tested against local synthetic `results.csv` (no crash; correctly reports "insufficient
+  conditions" when `gradnorm_prop`/`gradnorm_inverse` rows don't exist yet).
+- `make_figures.py`: all six figures implemented, each skips gracefully (prints why, doesn't crash)
+  when its required data isn't present yet rather than assuming real tier-1 data exists. Figure 1
+  (allocation profiles) reads probe JSON directly, not `results.csv`, since per-module signal data
+  has nowhere else to live -- "regenerable from results.csv alone" is read as "from the saved
+  `results/` tree, without re-running experiments," not literally only the CSV file. Rendered and
+  visually inspected 5 of 6 locally against synthetic/smoke data (missing only the `fixed_alpha`
+  scaling-trap panel, since no such condition exists in my tiny local test set); all renders were
+  structurally sane, not garbled or empty.
+- Full suite: 265/265 green (254 prior + 11 new metrics tests).
+
+**Gate**: `--dry_run` on both real tier-1 and tier-2 grids verified locally (correct run counts,
+correct probe-id reuse and cache-skip behavior, correct skip-on-resume) -- but the *projected
+GPU-hours* number is only meaningful once it reads a real `results/preflight.json` calibration,
+which only exists on Kaggle (locally it falls back to a conservative flat estimate with a printed
+warning). SIGKILL/resume already verified for real, as above -- that part of the gate is closed
+regardless of GPU. Requesting a Kaggle `--dry_run` run against `grid_tier1.yaml` for the real
+GPU-hour projection before considering this phase's Kaggle gate fully closed.

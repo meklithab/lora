@@ -1,0 +1,44 @@
+# Base RunConfig -- run_grid.py layers grid-level and per-condition overrides on top of this.
+# Loaded with strict key validation (rankalloc.config.from_yaml); an unknown key is a hard error.
+seed: 0
+model_name: Qwen/Qwen2.5-0.5B-Instruct
+target_modules:
+  - q_proj
+  - k_proj
+  - v_proj
+  - o_proj
+  - gate_proj
+  - up_proj
+  - down_proj
+data:
+  task: gsm8k
+  max_seq_len: 512
+  split_seed: 12345
+  val_loss_n: 300
+  val_gen_n: 200
+probe:
+  rank: 8
+  steps: 100
+  task: gsm8k
+alloc:
+  strategy: uniform
+  budget_rank: 16
+  signal: rms
+  temperature: 1.0
+  r_min: 1
+  r_max: 128
+  lambda_decay: 1.0
+  probe_id: null
+scaling:
+  mode: constant_ratio
+  alpha_ratio: 2
+  fixed_alpha: 32
+optim:
+  lr: 0.0002
+  max_steps: 400
+  warmup_ratio: 0.03
+  max_grad_norm: 1.0
+  micro_batch: 4
+eval:
+  run_generation: true
+  max_new_tokens: 256
