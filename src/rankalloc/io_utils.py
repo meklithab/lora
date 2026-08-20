@@ -61,9 +61,14 @@ def atomic_append_csv(csv_path, row: Dict[str, object], fieldnames: Iterable[str
         raise
 
 
-def existing_run_ids(csv_path) -> Set[str]:
+def existing_run_ids(csv_path, exclude_statuses: Iterable[str] = ()) -> Set[str]:
+    """run_ids already present in csv_path. Pass exclude_statuses={"failed"} to treat a crashed run
+    as retryable rather than permanently skipped on resume -- unlike a successful or OOM row, a
+    status=failed row may reflect a since-fixed bug, not a fact about the run itself.
+    """
     csv_path = Path(csv_path)
     if not csv_path.exists():
         return set()
+    exclude_statuses = set(exclude_statuses)
     with csv_path.open("r", newline="") as fh:
-        return {row["run_id"] for row in csv.DictReader(fh)}
+        return {row["run_id"] for row in csv.DictReader(fh) if row.get("status") not in exclude_statuses}

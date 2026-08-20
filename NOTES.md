@@ -308,3 +308,51 @@ every command needed to reproduce every number and figure. The real tier-1/tier-
 themselves haven't been executed yet -- that's the repo owner's call on timing, not part of this
 build's phase gates, and `results/` is deliberately gitignored so no partial/fake experiment data
 ships in the repo.
+
+## Bug found during the real tier-1 run: fp16 GradScaler overflow poisons probe signals (2026-08-20)
+
+- Repo owner ran the real tier-1 grid on Kaggle: `zero_shot`, `uniform` (5 seeds), `random` (3
+  seeds) all succeeded; all 5 `gradnorm_prop` and all 3 `gradnorm_inverse` runs failed identically:
+  `ValueError: cannot convert float NaN to integer` inside `solve_allocation`'s
+  `math.floor(ideal[n])`.
+- Root cause is in `probe.py`, not `allocation.py`. fp16 `GradScaler` routinely detects an
+  overflowed gradient on an early step (this is normal -- the whole point of dynamic loss scaling)
+  and skips `optimizer.step()` for that step. `probe.py` was reading `lora_B.weight.grad` and
+  folding it into the running signal average *before* checking whether the scaler actually accepted
+  the step -- so one overflow step (inf/nan gradient) silently poisoned that module's averaged `rms`
+  signal with NaN for the entire probe run. `train.py` already guarded against exactly this failure
+  mode (`scale_before`/`scale_after` comparison gating `scheduler.step()`); `probe.py` never did,
+  and CPU smoke testing couldn't have caught it since there's no GradScaler/overflow concept without
+  real fp16 autocast -- this needed a real fp16 GPU run to surface, which it did, on the first real
+  grid run.
+- Fixed by computing each step's per-module contribution into a temporary dict, then only merging it
+  into the running `accum` totals (and only calling `scheduler.step()`, and only incrementing a new
+  `valid_steps` counter) once the scaler confirms the step was actually applied. The final signal
+  average now divides by `valid_steps`, not the requested `steps` -- if a couple of early steps get
+  skipped that's fine and expected, the divisor stays correct. `valid_steps` is now recorded in the
+  probe JSON output for transparency. Added an `assert valid_steps > 0` for the (very unlikely)
+  degenerate case where every step overflows, since that would point at a real lr/init problem, not
+  routine overflow.
+- Defense in depth: `solve_allocation` now explicitly rejects non-finite or negative weights with a
+  clear error message pointing at a corrupted probe signal, instead of failing three calls deep
+  inside `math.floor` with a generic `ValueError` that gives no hint where to look.
+- **Operational consequence for the repo owner, not just a code fix**: the probe JSON already cached
+  on Kaggle disk (`results/probe/0ea0f59b6079.json`) was generated *before* this fix and still
+  contains the NaN-poisoned signal. `probe_id` hashes the probe *config*, not its contents, so
+  `run_grid.py`'s cache check (`if probe_path.exists(): skip`) will keep reusing that stale, broken
+  file indefinitely unless it's deleted first. Told the repo owner to delete it before retrying.
+- Separately (found by code inspection while diagnosing this, not from a second Kaggle failure): once
+  `run_grid.py` writes a `status=failed` row for a crashed run, that `run_id` was permanently
+  un-retryable on every future invocation, since `existing_run_ids` treated any row -- regardless of
+  status -- as "already done, skip". A fix that only changes the code does nothing for a condition
+  that's already marked failed in `results.csv`, since the grid would just keep skipping it forever.
+  Fixed `io_utils.existing_run_ids` to accept `exclude_statuses`, and `run_grid.py` now passes
+  `exclude_statuses={"failed"}` so a failed run is retried on the next invocation, while `ok`/`oom`
+  rows still count as done (retrying an OOM at the same batch size would just OOM again, per §4.6's
+  "do not silently retry at a different batch size").
+- Full suite: 265/265 still green. Regression-checked the CPU probe path specifically (unaffected,
+  since there's no scaler-skip concept without real fp16 -- `valid_steps == steps` there always).
+
+**Gate**: pending -- awaiting a Kaggle re-run of the real tier-1 grid (after deleting the stale
+cached gsm8k probe JSON) to confirm the fix actually resolves the failure against real fp16 overflow
+behavior, not just in theory.
