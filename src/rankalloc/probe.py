@@ -37,6 +37,8 @@ class ProbeResult:
     task: str
     rank: int
     steps: int
+    valid_steps: int  # steps actually folded into signals -- may be < steps if fp16 GradScaler
+    # skipped an early overflow step (routine, not an error); see run_probe's docstring comment
     signals: Dict[str, Dict[str, float]]  # signal_name -> {module_name: value}
     module_meta: Dict[str, dict]  # module_name -> {in_features, out_features, numel, layer_idx, proj_type}
     probe_wall_seconds: float
@@ -133,6 +135,7 @@ def run_probe(
         gpu_end_evt = torch.cuda.Event(enable_timing=True)
         gpu_start_evt.record()
 
+    valid_steps = 0
     for step in range(steps):
         batch_examples = [examples[(step * micro_batch + i) % n_examples] for i in range(micro_batch)]
         input_ids, labels, attention_mask = collate_batch(batch_examples, tokenizer.pad_token_id, device)
@@ -146,6 +149,12 @@ def run_probe(
             out = model(input_ids=input_ids, labels=labels, attention_mask=attention_mask)
             out.loss.backward()
 
+        # Compute this step's per-module contribution before we know whether fp16 GradScaler will
+        # accept it -- an overflow step (routine in early fp16 training; that's the whole point of
+        # dynamic loss scaling) can leave .grad full of inf/nan, and folding even one such step into
+        # the running signal average poisons it with NaN for the rest of the run. Only merge into
+        # accum once we know the scaler actually applied the step.
+        step_contrib = {key: {} for key in SIGNAL_KEYS}
         for name, b_param in lora_b_by_name.items():
             grad = b_param.weight.grad
             if grad is None:
@@ -154,17 +163,31 @@ def run_probe(
             numel = grad.numel()
             g_norm = torch.linalg.vector_norm(grad).item()
             w_norm = torch.linalg.vector_norm(b_param.weight.detach().float()).item()
-            accum["rms"][name] += g_norm / (numel**0.5)
-            accum["raw_norm"][name] += g_norm
-            accum["fisher"][name] += float((grad**2).sum().item()) / numel
-            accum["relative"][name] += g_norm / (w_norm + eps)
+            step_contrib["rms"][name] = g_norm / (numel**0.5)
+            step_contrib["raw_norm"][name] = g_norm
+            step_contrib["fisher"][name] = float((grad**2).sum().item()) / numel
+            step_contrib["relative"][name] = g_norm / (w_norm + eps)
 
         if use_amp:
+            scale_before = scaler.get_scale()
             scaler.step(optimizer)
             scaler.update()
+            stepped = scaler.get_scale() >= scale_before
         else:
             optimizer.step()
-        scheduler.step()
+            stepped = True
+
+        if stepped:
+            for key in SIGNAL_KEYS:
+                for name, val in step_contrib[key].items():
+                    accum[key][name] += val
+            valid_steps += 1
+            scheduler.step()
+
+    assert valid_steps > 0, (
+        "every probe step was skipped by the fp16 GradScaler (all-inf/nan gradients) -- this points "
+        "at something wrong with lr/init, not routine early-step overflow"
+    )
 
     if use_amp:
         gpu_end_evt.record()
@@ -174,7 +197,7 @@ def run_probe(
         probe_gpu_seconds = 0.0
     probe_wall_seconds = time.perf_counter() - wall_start
 
-    signals = {key: {name: accum[key][name] / steps for name in rank_pattern} for key in SIGNAL_KEYS}
+    signals = {key: {name: accum[key][name] / valid_steps for name in rank_pattern} for key in SIGNAL_KEYS}
 
     result = ProbeResult(
         probe_id=probe_id,
@@ -182,6 +205,7 @@ def run_probe(
         task=task,
         rank=rank,
         steps=steps,
+        valid_steps=valid_steps,
         signals=signals,
         module_meta=module_meta,
         probe_wall_seconds=probe_wall_seconds,
@@ -205,6 +229,7 @@ def field_asdict(result: ProbeResult) -> dict:
         "task": result.task,
         "rank": result.rank,
         "steps": result.steps,
+        "valid_steps": result.valid_steps,
         "signals": result.signals,
         "module_meta": result.module_meta,
         "probe_wall_seconds": result.probe_wall_seconds,

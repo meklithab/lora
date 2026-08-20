@@ -123,6 +123,13 @@ def solve_allocation(
     names = [m.name for m in modules]
     if set(weights) != set(names):
         raise ValueError("weights keys must exactly match module names")
+    bad = {n: w for n, w in weights.items() if not math.isfinite(w) or w < 0}
+    if bad:
+        raise ValueError(
+            f"non-finite or negative weight(s): {bad} -- if these came from a probe signal, "
+            "the probe's gradient stats are corrupted (e.g. an fp16 overflow step that wasn't "
+            "excluded), not a solve_allocation bug"
+        )
     c = {m.name: m.c for m in modules}
 
     norm_w = _sharpen(weights, temperature)

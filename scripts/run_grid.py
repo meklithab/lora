@@ -169,7 +169,7 @@ def main():
             if not cached:
                 probe_hours += (base_cfg.probe.steps * per_step_seconds) / 3600.0
 
-        completed = existing_run_ids(RESULTS_CSV)
+        completed = existing_run_ids(RESULTS_CSV, exclude_statuses={"failed"})
         condition_hours = 0.0
         for r in runs:
             cfg = resolve_config(args.base_config, r["overrides"])
@@ -185,7 +185,7 @@ def main():
     probe_ids = run_probes(probe_tasks, args.base_config, args.device, dry_run=False)
     gsm8k_probe_id = probe_ids.get(ALLOCATION_DRIVING_TASK)
 
-    completed = existing_run_ids(RESULTS_CSV)
+    completed = existing_run_ids(RESULTS_CSV, exclude_statuses={"failed"})
     hours_spent = 0.0
     for r in runs:
         overrides = list(r["overrides"])
