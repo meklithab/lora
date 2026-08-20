@@ -280,10 +280,12 @@ fp16/CUDA, not just CPU smoke.
   structurally sane, not garbled or empty.
 - Full suite: 265/265 green (254 prior + 11 new metrics tests).
 
-**Gate**: `--dry_run` on both real tier-1 and tier-2 grids verified locally (correct run counts,
-correct probe-id reuse and cache-skip behavior, correct skip-on-resume) -- but the *projected
-GPU-hours* number is only meaningful once it reads a real `results/preflight.json` calibration,
-which only exists on Kaggle (locally it falls back to a conservative flat estimate with a printed
-warning). SIGKILL/resume already verified for real, as above -- that part of the gate is closed
-regardless of GPU. Requesting a Kaggle `--dry_run` run against `grid_tier1.yaml` for the real
-GPU-hour projection before considering this phase's Kaggle gate fully closed.
+**Gate**: PASSED. `--dry_run` on both real tier-1 and tier-2 grids verified locally (correct run
+counts, correct probe-id reuse/cache-skip, correct skip-on-resume); SIGKILL/resume verified for real
+locally (process/file-integrity property, not GPU-numerics). Kaggle `--dry_run` against
+`grid_tier1.yaml` after a fresh `preflight.py` run: both probes correctly showed `SKIP (cached)`
+(reusing the P3-gate probe JSONs already on disk -- confirms `probe_id` determinism holds across
+sessions, not just within one process), all 17 condition-runs listed correctly, projected 2.60
+GPU-hours for the pending work -- consistent with `preflight.py`'s own 2.64h tier-1 projection (both
+use the same coarse eval-time multiplier methodology), well under the 8h cutoff. Every piece of P5
+now confirmed against the real environment, not just local synthetic data.
