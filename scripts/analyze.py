@@ -28,15 +28,24 @@ def by_seed(df: pd.DataFrame, strategy: str, metric: str) -> dict:
     return dict(zip(sub["seed"], sub[metric]))
 
 
-def compare_to_uniform(df: pd.DataFrame, strategy: str, metric: str) -> dict:
+def compare_to_uniform(df: pd.DataFrame, strategy: str, metric: str, sd: float) -> dict:
+    """sd is the noise-floor sigma (pooled sd of the uniform-baseline seeds), shared across every
+    comparison for this metric -- but the MDE itself is computed per comparison, using that
+    comparison's own paired n, not the uniform baseline's seed count. Tier-1's grid deliberately runs
+    unequal seed counts (5 for uniform/gradnorm_prop, 3 for the two controls, BUILD_SPEC.md §6), and
+    a 3-seed comparison has a coarser (larger) true detection threshold than a 5-seed one -- applying
+    one blanket MDE to every comparison understated that for the smaller-n arms.
+    """
     uniform = by_seed(df, "uniform", metric)
     other = by_seed(df, strategy, metric)
     result = paired_delta(other, uniform)
+    mde = minimum_detectable_effect(sd, result.n) if result.n >= 2 else float("nan")
     return {
         "strategy": strategy,
         "metric": metric,
         "mean_delta_vs_uniform": result.mean_delta,
         "n_pairs": result.n,
+        "minimum_detectable_effect": mde,
         "pairs": result.pairs,
         "hedges_g": hedges_g(list(other.values()), list(uniform.values())),
         "cliffs_delta": cliffs_delta(list(other.values()), list(uniform.values())),
@@ -60,32 +69,35 @@ def _direction(delta, mde, lower_is_better):
     return "noise"
 
 
-def interpretation(comparisons: dict, mde: float, lower_is_better: bool) -> str:
+def interpretation(comparisons: dict, lower_is_better: bool) -> str:
     """BUILD_SPEC.md §4.4's four-outcome table, extended with a fifth outcome the table doesn't name:
     every non-uniform strategy reliably *worse* than uniform. With n<=5 seeds this is a coarse
     mean-delta-vs-MDE read, not a statistical test -- this pipeline deliberately computes no
     significance tests anywhere (§4.8); a human should read the raw `comparisons` alongside this
-    label, not trust it blindly.
+    label, not trust it blindly. Each comparison is gated on its *own* MDE (its own paired n), not a
+    single blanket threshold -- tier 1's grid runs unequal seed counts by design (§6), so a 3-seed
+    control has a coarser true detection threshold than the 5-seed hypothesis arm.
     """
     directions = {}
     for strat in CONTROL_STRATEGIES:
         cmp = comparisons.get(strat)
         if cmp is None:
             return f"insufficient conditions to interpret (missing {strat} vs uniform)"
-        directions[strat] = _direction(cmp["mean_delta_vs_uniform"], mde, lower_is_better)
+        directions[strat] = _direction(cmp["mean_delta_vs_uniform"], cmp["minimum_detectable_effect"], lower_is_better)
     if any(v is None for v in directions.values()):
-        return "insufficient uniform seeds for an MDE-gated read"
+        return "insufficient seeds for an MDE-gated read on at least one comparison"
 
     prop, inverse, random_ = directions["gradnorm_prop"], directions["gradnorm_inverse"], directions["random"]
+    mdes = ", ".join(f"{s}={comparisons[s]['minimum_detectable_effect']:.4g}" for s in CONTROL_STRATEGIES)
 
     if prop == "worse" and inverse == "worse" and random_ == "worse":
         return (
-            f"uniform beats every non-uniform strategy tested, beyond the MDE (MDE={mde:.4g}) -- "
+            f"uniform beats every non-uniform strategy tested, each beyond its own MDE ({mdes}) -- "
             "non-uniform allocation is actively worse here, not neutral; this is a real negative "
             "result, not 'allocation doesn't matter'"
         )
     if prop == "noise" and inverse == "noise" and random_ == "noise":
-        return f"prop ~ inverse ~ random ~ uniform: allocation doesn't matter at this scale (MDE={mde:.4g})"
+        return f"prop ~ inverse ~ random ~ uniform: allocation doesn't matter at this scale (MDEs: {mdes})"
     if prop == "better" and inverse == "better" and random_ == "better":
         return "prop ~ inverse ~ random > uniform: non-uniformity itself helps; the gradient signal is irrelevant"
     if prop == "better" and inverse == "better" and random_ != "better":
@@ -102,21 +114,24 @@ def analyze_metric(df: pd.DataFrame, metric: str) -> dict:
     uniform_values = list(by_seed(df, "uniform", metric).values())
     n_uniform = len(uniform_values)
     sd = pooled_sd(uniform_values) if n_uniform >= 2 else float("nan")
-    mde = minimum_detectable_effect(sd, n_uniform) if n_uniform >= 2 else float("nan")
+    # reference MDE at the uniform baseline's own seed count -- a headline number, not what every
+    # comparison is actually gated on (see compare_to_uniform / interpretation for the per-comparison
+    # MDEs that unequal-n comparisons, e.g. tier 1's 3-seed controls, actually need).
+    mde_at_n_uniform = minimum_detectable_effect(sd, n_uniform) if n_uniform >= 2 else float("nan")
 
     comparisons = {}
     for strategy in df["strategy"].unique():
         if strategy in ("uniform", "zero_shot"):
             continue
-        comparisons[strategy] = compare_to_uniform(df, strategy, metric)
+        comparisons[strategy] = compare_to_uniform(df, strategy, metric, sd)
 
     return {
         "noise_floor_pooled_sd": sd,
         "n_uniform_seeds": n_uniform,
-        "minimum_detectable_effect": mde,
+        "minimum_detectable_effect_at_n_uniform": mde_at_n_uniform,
         "comparisons": comparisons,
-        "interpretation": interpretation(comparisons, mde, LOWER_IS_BETTER[metric])
-        if not pd.isna(mde) else "insufficient uniform seeds for MDE",
+        "interpretation": interpretation(comparisons, LOWER_IS_BETTER[metric])
+        if not pd.isna(sd) else "insufficient uniform seeds for MDE",
     }
 
 
