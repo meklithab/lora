@@ -1,0 +1,22 @@
+# Tier 1 -- the runs that make the paper. BUILD_SPEC.md §6.
+# Not a RunConfig: run_grid.py expands this into one RunConfig per (condition, seed) on top of
+# configs/base.yaml, plus one probe run per task in `probes`.
+budget_rank: 16
+scaling_mode: constant_ratio
+signal: rms
+max_steps: 400
+conditions:
+  - strategy: zero_shot
+    n_seeds: 1
+    train: false
+  - strategy: uniform          # noise floor
+    n_seeds: 5
+  - strategy: gradnorm_prop    # hypothesis
+    n_seeds: 5
+  - strategy: gradnorm_inverse # directional control
+    n_seeds: 3
+  - strategy: random           # non-uniformity control
+    n_seeds: 3
+probes:
+  - gsm8k
+  - alpaca

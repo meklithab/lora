@@ -22,18 +22,10 @@ from rankalloc.config import RunConfig, apply_overrides, from_yaml
 from rankalloc.config import run_id as compute_run_id
 from rankalloc.data import load_task
 from rankalloc.evaluate import compute_gsm8k_generation, compute_held_out_loss
-from rankalloc.io_utils import atomic_append_csv, run_dir as get_run_dir
+from rankalloc.io_utils import RESULT_FIELDS, RESULTS_CSV, atomic_append_csv, run_dir as get_run_dir
 from rankalloc.modeling import alloc_json_payload, build_model, discover_module_specs, load_base_model, verify_live_model
 from rankalloc.seeding import set_seed
 from rankalloc.train import train as train_loop
-
-RESULT_FIELDS = [
-    "run_id", "condition", "seed", "strategy", "signal", "temperature", "scaling_mode",
-    "budget_rank", "adapter_params_verified", "budget_abs_error", "budget_rel_error",
-    "train_tokens", "supervised_tokens", "max_steps", "loss_token_weighted", "loss_example_mean",
-    "gsm8k_strict", "gsm8k_flexible", "train_gpu_seconds", "train_wall_seconds", "samples_per_sec",
-    "eval_gpu_seconds", "probe_gpu_seconds", "peak_vram_mb", "gpu_name", "status", "git_sha", "timestamp",
-]
 
 
 def load_probe_signal(probe_id: str, signal_key: str):
@@ -196,7 +188,7 @@ def main():
 
     out_dir.mkdir(parents=True, exist_ok=True)
     (out_dir / "metrics.json").write_text(json.dumps(metrics, indent=2, default=str))
-    atomic_append_csv(Path("results/results.csv"), metrics, RESULT_FIELDS)
+    atomic_append_csv(RESULTS_CSV, metrics, RESULT_FIELDS)
 
     print(json.dumps(metrics, indent=2, default=str))
 
