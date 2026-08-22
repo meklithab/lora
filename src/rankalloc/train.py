@@ -59,13 +59,35 @@ def train(
     run_dir: Path,
     eval_every: int = 50,
     eval_fn: Optional[Callable] = None,
+    clip_mode: str = "global",
+    data_order_seed: Optional[int] = None,
 ) -> TrainResult:
     """eval_fn(model) -> dict is called every eval_every steps (and on the final step) for the
     periodic held-out-loss learning curve -- these points are a result (§4.6), not a diagnostic.
+
+    clip_mode selects how max_grad_norm is applied: "global" over the union of LoRA parameters
+    (standard, but couples modules -- a condition whose total gradient norm is larger gets every
+    module shrunk, so the effective step size becomes allocation-dependent), "per_module" over each
+    adapter independently (removes that coupling), or "none".
+
+    data_order_seed, when not None, shuffles the training examples for this run. Leaving it None
+    reproduces the fixed-order protocol in which every run sees identical data in identical order.
     """
+    if clip_mode not in ("global", "per_module", "none"):
+        raise ValueError(f"unknown clip_mode: {clip_mode!r}")
     use_amp = str(device).startswith("cuda")
     model.train()
     trainable = [p for p in model.parameters() if p.requires_grad]
+    # Group parameters by owning adapter so per-module clipping can bound each independently.
+    clip_groups = []
+    if clip_mode == "per_module":
+        by_module = {}
+        for name, param in model.named_parameters():
+            if not param.requires_grad:
+                continue
+            owner = name.rsplit(".lora_", 1)[0]
+            by_module.setdefault(owner, []).append(param)
+        clip_groups = list(by_module.values())
     optimizer = torch.optim.AdamW(trainable, lr=lr)
     scheduler = get_cosine_schedule_with_warmup(
         optimizer, num_warmup_steps=int(max_steps * warmup_ratio), num_training_steps=max_steps
