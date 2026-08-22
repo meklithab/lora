@@ -39,6 +39,7 @@ def main():
         device=args.device,
         dtype=dtype,
         out_dir=args.out_dir,
+        freeze_a=cfg.probe.freeze_a,
     )
     print(f"probe_id={result.probe_id} task={result.task} wall={result.probe_wall_seconds:.1f}s gpu={result.probe_gpu_seconds:.1f}s")
 

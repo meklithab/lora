@@ -101,7 +101,7 @@ def main():
         "run_id": rid, "condition": args.condition, "seed": cfg.seed, "strategy": cfg.alloc.strategy,
         "signal": None, "temperature": cfg.alloc.temperature, "scaling_mode": cfg.scaling.mode,
         "budget_rank": cfg.alloc.budget_rank, "adapter_params_verified": False, "budget_abs_error": 0.0,
-        "budget_rel_error": 0.0, "train_tokens": bundle.stats.get("total_tokens", 0),
+        "budget_rel_error": 0.0, "quota_max_deviation": 0.0, "clip_mode": cfg.optim.clip_mode, "train_tokens": bundle.stats.get("total_tokens", 0),
         "supervised_tokens": bundle.stats.get("supervised_tokens", 0), "max_steps": cfg.optim.max_steps,
         "loss_token_weighted": None, "loss_example_mean": None, "gsm8k_strict": None, "gsm8k_flexible": None,
         "train_gpu_seconds": 0.0, "train_wall_seconds": 0.0, "samples_per_sec": 0.0, "eval_gpu_seconds": 0.0,
@@ -122,6 +122,7 @@ def main():
         model, alpha_pattern = build_model(
             cfg.model_name, alloc.rank_pattern, cfg.scaling.mode, cfg.scaling.alpha_ratio, cfg.scaling.fixed_alpha,
             target_modules=cfg.target_modules, dtype=dtype, device=device, gradient_checkpointing=use_amp,
+            reference_rank=cfg.alloc.budget_rank,
         )
         verified = verify_live_model(model, alloc.rank_pattern, alpha_pattern)
         assert verified["adapter_params_total"] == alloc.params_total
@@ -132,6 +133,7 @@ def main():
         metrics.update(
             signal=alloc.signal, adapter_params_verified=verified["adapter_params_verified"],
             budget_abs_error=alloc.abs_error, budget_rel_error=alloc.rel_error, probe_gpu_seconds=probe_gpu_seconds,
+            quota_max_deviation=alloc.quota_max_deviation, clip_mode=cfg.optim.clip_mode,
         )
 
         eval_every = max(1, min(50, cfg.optim.max_steps // 4))
@@ -143,6 +145,7 @@ def main():
             model, bundle.train, tokenizer.pad_token_id, max_steps=cfg.optim.max_steps, lr=cfg.optim.lr,
             warmup_ratio=cfg.optim.warmup_ratio, max_grad_norm=cfg.optim.max_grad_norm, micro_batch=cfg.optim.micro_batch,
             device=device, run_dir=out_dir, eval_every=eval_every, eval_fn=eval_fn,
+            clip_mode=cfg.optim.clip_mode, data_order_seed=cfg.data.train_order_seed,
         )
         status = train_result.status
         metrics["status"] = status

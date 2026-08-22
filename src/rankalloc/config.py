@@ -26,6 +26,12 @@ class DataConfig:
     split_seed: int = 12345
     val_loss_n: int = 300
     val_gen_n: int = 200
+    # Order in which training examples are consumed. None => derive from split_seed, i.e. every run
+    # sees identical data in identical order. That is the compute/data-matching invariant (I3), but
+    # it also means the seed-to-seed spread measures *initialisation* noise only and understates
+    # true run-to-run variance. Set this to the run seed to fold data-order noise into the noise
+    # floor -- see README "Limitations" L4.
+    train_order_seed: Optional[int] = None
 
 
 @dataclass(frozen=True)
@@ -33,13 +39,16 @@ class ProbeConfig:
     rank: int = 8
     steps: int = 100
     task: str = "gsm8k"  # "gsm8k" | "alpaca"
+    # Freeze lora_A so dL/dB stays an unbiased random sketch of the frozen-weight gradient for the
+    # whole probe (probe.py module docstring). Turning this off measures a different quantity.
+    freeze_a: bool = True
 
 
 @dataclass(frozen=True)
 class AllocConfig:
     strategy: str = "uniform"  # uniform | gradnorm_prop | gradnorm_inverse | random | early_heavy | late_heavy
     budget_rank: int = 16
-    signal: str = "rms"  # rms | raw_norm | fisher | relative
+    signal: str = "rms"  # rms | raw_norm | fisher | relative | coherent
     temperature: float = 1.0
     r_min: int = 1
     r_max: int = 128
@@ -60,6 +69,11 @@ class OptimConfig:
     max_steps: int = 400
     warmup_ratio: float = 0.03
     max_grad_norm: float = 1.0
+    # "global" clips the norm over the union of all LoRA parameters (standard practice, but it makes
+    # each module's effective step depend on the *other* modules' gradients, which varies with the
+    # allocation); "per_module" clips each adapter independently, removing that coupling; "none"
+    # disables clipping. See README "Limitations" L3.
+    clip_mode: str = "global"  # global | per_module | none
     micro_batch: int = 4  # calibrated on a real Tesla T4 in P0 preflight, see NOTES.md
 
 

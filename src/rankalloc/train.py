@@ -2,6 +2,7 @@
 BUILD_SPEC.md §4.6.
 """
 import json
+import random
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -11,6 +12,26 @@ import torch
 from transformers import get_cosine_schedule_with_warmup
 
 from rankalloc.data import TokenizedExample, collate_batch
+
+
+def _clip(trainable, clip_groups, clip_mode, max_grad_norm):
+    """Apply gradient clipping and return the *global* pre-clip norm for logging.
+
+    The returned value is always the global norm regardless of mode, so step_log.jsonl stays
+    comparable across clip modes and can be used to measure how often the clip actually binds.
+    """
+    grads = [p.grad for p in trainable if p.grad is not None]
+    if not grads:
+        return 0.0
+    total = torch.linalg.vector_norm(
+        torch.stack([torch.linalg.vector_norm(g.detach().float()) for g in grads])
+    )
+    if clip_mode == "global":
+        torch.nn.utils.clip_grad_norm_(trainable, max_grad_norm)
+    elif clip_mode == "per_module":
+        for group in clip_groups:
+            torch.nn.utils.clip_grad_norm_(group, max_grad_norm)
+    return float(total)
 
 
 @dataclass
@@ -38,18 +59,44 @@ def train(
     run_dir: Path,
     eval_every: int = 50,
     eval_fn: Optional[Callable] = None,
+    clip_mode: str = "global",
+    data_order_seed: Optional[int] = None,
 ) -> TrainResult:
     """eval_fn(model) -> dict is called every eval_every steps (and on the final step) for the
     periodic held-out-loss learning curve -- these points are a result (§4.6), not a diagnostic.
+
+    clip_mode selects how max_grad_norm is applied: "global" over the union of LoRA parameters
+    (standard, but couples modules -- a condition whose total gradient norm is larger gets every
+    module shrunk, so the effective step size becomes allocation-dependent), "per_module" over each
+    adapter independently (removes that coupling), or "none".
+
+    data_order_seed, when not None, shuffles the training examples for this run. Leaving it None
+    reproduces the fixed-order protocol in which every run sees identical data in identical order.
     """
+    if clip_mode not in ("global", "per_module", "none"):
+        raise ValueError(f"unknown clip_mode: {clip_mode!r}")
     use_amp = str(device).startswith("cuda")
     model.train()
     trainable = [p for p in model.parameters() if p.requires_grad]
+    # Group parameters by owning adapter so per-module clipping can bound each independently.
+    clip_groups = []
+    if clip_mode == "per_module":
+        by_module = {}
+        for name, param in model.named_parameters():
+            if not param.requires_grad:
+                continue
+            owner = name.rsplit(".lora_", 1)[0]
+            by_module.setdefault(owner, []).append(param)
+        clip_groups = list(by_module.values())
     optimizer = torch.optim.AdamW(trainable, lr=lr)
     scheduler = get_cosine_schedule_with_warmup(
         optimizer, num_warmup_steps=int(max_steps * warmup_ratio), num_training_steps=max_steps
     )
     scaler = torch.amp.GradScaler("cuda") if use_amp else None
+
+    if data_order_seed is not None:
+        train_examples = list(train_examples)
+        random.Random(data_order_seed).shuffle(train_examples)
 
     n_examples = len(train_examples)
     assert n_examples > 0, "no training examples available"
@@ -82,7 +129,7 @@ def train(
                         out = model(input_ids=input_ids, labels=labels, attention_mask=attention_mask)
                     scaler.scale(out.loss).backward()
                     scaler.unscale_(optimizer)
-                    grad_norm = torch.nn.utils.clip_grad_norm_(trainable, max_grad_norm)
+                    grad_norm = _clip(trainable, clip_groups, clip_mode, max_grad_norm)
                     scale_before = scaler.get_scale()
                     scaler.step(optimizer)
                     scaler.update()
@@ -94,7 +141,7 @@ def train(
                 else:
                     out = model(input_ids=input_ids, labels=labels, attention_mask=attention_mask)
                     out.loss.backward()
-                    grad_norm = torch.nn.utils.clip_grad_norm_(trainable, max_grad_norm)
+                    grad_norm = _clip(trainable, clip_groups, clip_mode, max_grad_norm)
                     optimizer.step()
                     stepped = True
                 if stepped:

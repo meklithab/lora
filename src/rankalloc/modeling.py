@@ -6,6 +6,7 @@ rank_pattern becomes an alpha_pattern (the I2 scaling-invariance trap) and where
 actual peft.PeftModel whose real parameter counts we read back and assert against, never trusted from
 the config alone.
 """
+import math
 import re
 from typing import Dict, List, Optional
 
@@ -48,19 +49,47 @@ def discover_module_specs(model, target_modules=DEFAULT_TARGET_MODULES) -> List[
     return specs
 
 
-def compute_alpha_pattern(rank_pattern: Dict[str, int], scaling_mode: str, alpha_ratio: int, fixed_alpha: int) -> Dict[str, float]:
-    """The I2 scaling trap lives here: constant_ratio holds alpha/r fixed across modules so capacity
-    varies without changing effective step size; fixed_alpha is the naive ablation kept on purpose
-    (BUILD_SPEC.md §4.5); rslora keeps the same alpha as constant_ratio but PEFT divides by sqrt(r)
-    instead of r (use_rslora=True in wrap_with_lora), which is what makes it a genuinely different,
-    not equivalent, normalisation.
+def compute_alpha_pattern(
+    rank_pattern: Dict[str, int],
+    scaling_mode: str,
+    alpha_ratio: int,
+    fixed_alpha: int,
+    reference_rank: int = 16,
+) -> Dict[str, float]:
+    """The I2 scaling trap lives here. Each mode is a different exponent on the multiplier
+    s(r) that LoRA applies to B @ A x:
+
+        constant_ratio   s(r) = alpha_ratio                       (alpha = alpha_ratio * r)
+        rslora           s(r) = alpha_ratio * sqrt(R/r)           (alpha = alpha_ratio * sqrt(R),
+                                                                   PEFT then divides by sqrt(r))
+        fixed_alpha      s(r) = alpha_ratio * R / r               (alpha = alpha_ratio * R)
+
+    All three are anchored so that s(reference_rank) == alpha_ratio: at r = R every mode applies an
+    identical multiplier, and they differ *only* in how they extrapolate away from R. Without that
+    anchoring the modes would also differ by an overall constant, confounding "which r-exponent"
+    with "how strong is the adapter overall".
+
+    NOTE on the exponent choice. Holding alpha/r constant does NOT make the comparison
+    rank-neutral under AdamW. With B initialised at zero, Adam drives |B_jk| towards ~lr*t
+    independently of r, and ||A x|| grows as sqrt(r), so the adapter's contribution scales as
+    s(r) * r^theta with theta in [1/2, 1] (1/2 if B's columns stay incoherent with A x, 1 if they
+    align, which consistent gradients encourage). Rank-neutrality therefore needs
+    s(r) ~ r^(-theta), i.e. an exponent in [-1, -1/2]: fixed_alpha sits at -1, rslora at -1/2, and
+    constant_ratio at 0 -- outside the bracket on the wrong side, meaning higher-rank modules adapt
+    *faster*, not equally. theta is an empirical property of the trajectory, not a derivable
+    constant, so scaling.mode is deliberately left as a config choice and the ablation is what
+    settles it. See README "Limitations" L2.
     """
     if scaling_mode == "constant_ratio":
         return {name: float(alpha_ratio * r) for name, r in rank_pattern.items()}
     if scaling_mode == "fixed_alpha":
         return {name: float(fixed_alpha) for name in rank_pattern}
     if scaling_mode == "rslora":
-        return {name: float(alpha_ratio * r) for name, r in rank_pattern.items()}
+        # PEFT computes scaling = lora_alpha / sqrt(r) when use_rslora=True, so a *constant* alpha
+        # is what produces the canonical alpha/sqrt(r) rule. Passing alpha_ratio * r here (as an
+        # earlier revision did) yields s(r) = alpha_ratio * sqrt(r) -- scaling that *grows* with
+        # rank, the opposite of what rsLoRA specifies.
+        return {name: float(alpha_ratio) * math.sqrt(reference_rank) for name in rank_pattern}
     raise ValueError(f"Unknown scaling_mode: {scaling_mode!r}")
 
 
@@ -93,9 +122,10 @@ def build_model(
     dtype=torch.float16,
     device: Optional[str] = "cuda",
     gradient_checkpointing: bool = True,
+    reference_rank: int = 16,
 ):
     base = load_base_model(model_name, dtype=dtype, device=device, gradient_checkpointing=gradient_checkpointing)
-    alpha_pattern = compute_alpha_pattern(rank_pattern, scaling_mode, alpha_ratio, fixed_alpha)
+    alpha_pattern = compute_alpha_pattern(rank_pattern, scaling_mode, alpha_ratio, fixed_alpha, reference_rank)
     model = wrap_with_lora(base, rank_pattern, alpha_pattern, scaling_mode, target_modules)
     return model, alpha_pattern
 
