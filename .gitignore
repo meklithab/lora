@@ -12,3 +12,14 @@ results/*
 !results/runs/
 results/runs/*
 !results/runs/.gitkeep
+COMMIT.sh
+.env
+claude.md
+notes.md
+Build_Spec.md
+
+
+.env
+CLAUDE.md
+NOTES.md
+BUILD_SPEC.md
