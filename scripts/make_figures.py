@@ -2,6 +2,7 @@
 BUILD_SPEC.md §5.
 """
 import json
+import math
 import sys
 from pathlib import Path
 
@@ -13,16 +14,43 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import pandas as pd
 
-from rankalloc.metrics import minimum_detectable_effect, paired_delta, pooled_sd
+from rankalloc.metrics import (
+    minimum_detectable_effect,
+    paired_delta,
+    pooled_sd,
+    pooled_two_sample_sd,
+)
 
 RESULTS_DIR = Path("results")
 FIGURES_DIR = RESULTS_DIR / "figures"
 PRIMARY_METRIC = "loss_token_weighted"
 
 
+EXCLUDED_CONDITIONS = ("smoke_test",)
+
+
 def load_results() -> pd.DataFrame:
+    """Only real experimental rows.
+
+    Dropping non-experimental conditions matters more than it looks: fig_noise_floor plots the raw
+    per-run spread rather than a per-seed dict, so a single short smoke run left in results.csv
+    inflates the plotted baseline sd by orders of magnitude and makes the noise floor look far
+    wider than it is.
+    """
     df = pd.read_csv(RESULTS_DIR / "results.csv")
-    return df[df["status"] == "ok"]
+    df = df[df["status"] == "ok"]
+    return df[~df["condition"].isin(EXCLUDED_CONDITIONS)]
+
+
+def _by_seed(df: pd.DataFrame, strategy: str, metric: str) -> dict:
+    sub = df[df.strategy == strategy]
+    dupes = sub["seed"].duplicated().sum()
+    if dupes:
+        raise SystemExit(
+            f"{strategy!r} has {dupes} duplicate seed row(s) in results.csv -- refusing to plot a "
+            "figure whose contents would depend on row order. Deduplicate results.csv first."
+        )
+    return dict(zip(sub["seed"], sub[metric]))
 
 
 def _save(fig, name):
@@ -53,8 +81,24 @@ def fig_allocation_profiles():
     for ax, task in zip(axes, tasks):
         data = by_task[task]
         rms, meta = data["signals"]["rms"], data["module_meta"]
-        ax.scatter([meta[m]["layer_idx"] for m in rms], list(rms.values()), s=8, alpha=0.6)
-        ax.set_title(f"{task} probe rms signal")
+        # A probe written before the GradScaler-overflow fix can carry NaN for whichever modules
+        # were live on the poisoned step. Plotting those silently drops points and makes a stale
+        # artifact look like a thin panel rather than a broken one, so say so out loud.
+        finite = {m: v for m, v in rms.items() if isinstance(v, (int, float)) and math.isfinite(v)}
+        n_bad = len(rms) - len(finite)
+        stale = "unscaled" not in data or "freeze_a" not in data
+        if n_bad or stale:
+            print(
+                f"WARNING fig_allocation_profiles: probe for task={task!r} "
+                f"({data.get('probe_id', '?')}) has {n_bad} non-finite module(s)"
+                + (" and predates the unscale/freeze-A probe fixes" if stale else "")
+                + " -- regenerate it with scripts/run_probe.py before using this panel."
+            )
+        ax.scatter([meta[m]["layer_idx"] for m in finite], list(finite.values()), s=8, alpha=0.6)
+        title = f"{task} probe rms signal"
+        if n_bad or stale:
+            title += "\n(STALE/INCOMPLETE - regenerate)"
+        ax.set_title(title)
         ax.set_xlabel("layer index")
     axes[0].set_ylabel("rms gradient signal")
     fig.suptitle("Allocation-driving signal by layer (probe rms)")
@@ -62,31 +106,44 @@ def fig_allocation_profiles():
 
 
 def fig_forest_plot(df, metric=PRIMARY_METRIC):
-    uniform = dict(zip(df[df.strategy == "uniform"]["seed"], df[df.strategy == "uniform"][metric]))
-    n_uniform = len(uniform)
-    sd = pooled_sd(list(uniform.values())) if n_uniform >= 2 else float("nan")
-    mde = minimum_detectable_effect(sd, n_uniform) if n_uniform >= 2 else float("nan")
+    """One MDE bar *per comparison*, not one shared band.
+
+    Arms are run at different seed counts by design and have different variances, so a single band
+    drawn from one arm's numbers misrepresents every other arm. Each row therefore carries its own
+    interval, computed from a sigma pooled across that comparison's two arms at that comparison's n.
+    """
+    uniform = _by_seed(df, "uniform", metric)
 
     strategies = [s for s in df["strategy"].unique() if s not in ("uniform", "zero_shot")]
     if not strategies:
         print("skip fig_forest_plot: no non-uniform conditions in results.csv yet")
         return
 
-    fig, ax = plt.subplots(figsize=(7, 1.2 * len(strategies) + 1))
+    fig, ax = plt.subplots(figsize=(7.5, 1.3 * len(strategies) + 1.4))
+    labels = []
     for i, strat in enumerate(strategies):
-        other = dict(zip(df[df.strategy == strat]["seed"], df[df.strategy == strat][metric]))
+        other = _by_seed(df, strat, metric)
         result = paired_delta(other, uniform)
-        ax.scatter([p["delta"] for p in result.pairs], [i] * len(result.pairs), color="gray", alpha=0.6, zorder=2)
+        seeds = [pr["seed"] for pr in result.pairs]
+        sd = pooled_two_sample_sd([other[x] for x in seeds], [uniform[x] for x in seeds])
+        mde = minimum_detectable_effect(sd, result.n) if result.n >= 2 else float("nan")
+        ax.scatter([p["delta"] for p in result.pairs], [i] * len(result.pairs),
+                   color="gray", alpha=0.6, zorder=2)
         if result.n:
             ax.scatter([result.mean_delta], [i], color="C0", marker="D", s=60, zorder=3)
-    if not pd.isna(mde):
-        ax.axvspan(-mde, mde, color="C1", alpha=0.15, label=f"MDE band (+/-{mde:.3g})")
+        if not pd.isna(mde):
+            ax.plot([-mde, mde], [i, i], color="C1", linewidth=6, alpha=0.35, zorder=1,
+                    solid_capstyle="butt")
+        labels.append(f"{strat}\n(n={result.n}, MDE={mde:.3g})" if not pd.isna(mde) else strat)
     ax.axvline(0, color="black", linewidth=0.8)
     ax.set_yticks(range(len(strategies)))
-    ax.set_yticklabels(strategies)
+    ax.set_yticklabels(labels, fontsize=8)
     ax.set_xlabel(f"paired delta vs uniform ({metric})")
-    ax.legend()
-    fig.suptitle("Forest plot: paired delta vs uniform, individual seeds + MDE band")
+    ax.plot([], [], color="C1", linewidth=6, alpha=0.35, label="per-comparison MDE (pooled sigma)")
+    ax.scatter([], [], color="C0", marker="D", s=60, label="mean delta")
+    ax.scatter([], [], color="gray", alpha=0.6, label="individual seeds")
+    ax.legend(fontsize=7, loc="best")
+    fig.suptitle("Forest plot: paired delta vs uniform, individual seeds + per-comparison MDE")
     _save(fig, "02_forest_plot.png")
 
 
@@ -121,7 +178,7 @@ def fig_learning_curves(df):
 
 
 def fig_noise_floor(df, metric=PRIMARY_METRIC):
-    uniform = df[df.strategy == "uniform"][metric].dropna().tolist()
+    uniform = [v for v in _by_seed(df, "uniform", metric).values() if pd.notna(v)]
     if len(uniform) < 2:
         print("skip fig_noise_floor: fewer than 2 uniform-baseline seeds in results.csv")
         return

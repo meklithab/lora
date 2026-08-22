@@ -18,6 +18,7 @@ RESULTS_CSV = RESULTS_DIR / "results.csv"
 RESULT_FIELDS = [
     "run_id", "condition", "seed", "strategy", "signal", "temperature", "scaling_mode",
     "budget_rank", "adapter_params_verified", "budget_abs_error", "budget_rel_error",
+    "quota_max_deviation", "clip_mode",
     "train_tokens", "supervised_tokens", "max_steps", "loss_token_weighted", "loss_example_mean",
     "gsm8k_strict", "gsm8k_flexible", "train_gpu_seconds", "train_wall_seconds", "samples_per_sec",
     "eval_gpu_seconds", "probe_gpu_seconds", "peak_vram_mb", "gpu_name", "status", "git_sha", "timestamp",

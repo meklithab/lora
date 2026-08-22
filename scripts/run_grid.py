@@ -41,6 +41,9 @@ def load_grid(path: Path) -> dict:
     with open(path) as fh:
         spec = yaml.safe_load(fh)
     required = {"budget_rank", "scaling_mode", "signal", "max_steps", "conditions"}
+    unknown = set(spec) - (required | {"probes", "probe_seeds"})
+    if unknown:
+        raise ValueError("grid config " + str(path) + " has unknown key(s): " + str(sorted(unknown)))
     missing = required - set(spec)
     if missing:
         raise ValueError(f"grid config {path} missing required keys: {sorted(missing)}")
@@ -86,6 +89,14 @@ def resolve_config(base_config_path: Path, overrides: List[str]) -> RunConfig:
     return apply_overrides(cfg, overrides)
 
 
+def probe_seeds(spec: dict) -> List[int]:
+    """Seeds to draw the probe at. Several seeds make the *allocation* a replicated draw rather
+    than a single fixed one, which is what the statistical unit has to be for a claim about the
+    probe->allocation procedure (as opposed to a claim about one particular allocation).
+    """
+    return [int(x) for x in spec.get("probe_seeds", [0])]
+
+
 def needed_probe_tasks(spec: dict, runs: List[dict]) -> List[str]:
     tasks = set(spec.get("probes", []))
     if any(r["condition"] in GRADNORM_STRATEGIES for r in runs):
@@ -93,28 +104,65 @@ def needed_probe_tasks(spec: dict, runs: List[dict]) -> List[str]:
     return sorted(tasks)
 
 
-def run_probes(tasks: List[str], base_config_path: Path, device: str, dry_run: bool) -> Dict[str, str]:
+def probe_id_for(base_cfg: RunConfig, task: str, seed: int) -> str:
+    return compute_probe_id(
+        base_cfg.model_name, task, base_cfg.probe.rank, base_cfg.probe.steps,
+        seed=seed, split_seed=base_cfg.data.split_seed, freeze_a=base_cfg.probe.freeze_a,
+    )
+
+
+def run_probes(tasks, seeds, base_config_path: Path, device: str, dry_run: bool) -> Dict[tuple, str]:
     probe_ids = {}
     base_cfg = from_yaml(base_config_path) if base_config_path else RunConfig()
     for task in tasks:
-        probe_id = compute_probe_id(base_cfg.model_name, task, base_cfg.probe.rank, base_cfg.probe.steps, seed=0, split_seed=base_cfg.data.split_seed)
-        probe_ids[task] = probe_id
-        probe_path = Path("results/probe") / f"{probe_id}.json"
-        if probe_path.exists():
-            print(f"skip probe {probe_id} ({task}): already cached")
-            continue
-        if dry_run:
-            print(f"{probe_id}  probe:{task}  RUN")
-            continue
-        cmd = [sys.executable, "scripts/run_probe.py", "--device", device, "--set", f"probe.task={task}", "--set", "seed=0"]
-        print(f"running probe {probe_id} ({task})")
-        result = subprocess.run(cmd, capture_output=True, text=True)
-        if result.returncode != 0 or not probe_path.exists():
-            err_dir = Path("results/runs") / f"probe-{probe_id}"
-            err_dir.mkdir(parents=True, exist_ok=True)
-            (err_dir / "error.log").write_text(f"cmd: {' '.join(cmd)}\n\nSTDOUT:\n{result.stdout}\n\nSTDERR:\n{result.stderr}\n")
-            print(f"FAILED probe {probe_id}: see {err_dir / 'error.log'}")
+        for seed in seeds:
+            probe_id = probe_id_for(base_cfg, task, seed)
+            probe_ids[(task, seed)] = probe_id
+            probe_path = Path("results/probe") / (probe_id + ".json")
+            if probe_path.exists():
+                print("skip probe " + probe_id + " (" + task + ", seed=" + str(seed) + "): already cached")
+                continue
+            if dry_run:
+                print(probe_id + "  probe:" + task + " seed=" + str(seed) + "  RUN")
+                continue
+            cmd = [sys.executable, "scripts/run_probe.py", "--device", device,
+                   "--set", "probe.task=" + task, "--set", "seed=" + str(seed)]
+            print("running probe " + probe_id + " (" + task + ", seed=" + str(seed) + ")")
+            result = subprocess.run(cmd, capture_output=True, text=True)
+            if result.returncode != 0 or not probe_path.exists():
+                err_dir = Path("results/runs") / ("probe-" + probe_id)
+                err_dir.mkdir(parents=True, exist_ok=True)
+                (err_dir / "error.log").write_text(
+                    "cmd: " + " ".join(cmd) + chr(10) * 2
+                    + "STDOUT:" + chr(10) + result.stdout + chr(10) * 2
+                    + "STDERR:" + chr(10) + result.stderr + chr(10)
+                )
+                print("FAILED probe " + probe_id + ": see " + str(err_dir / "error.log"))
     return probe_ids
+
+
+def with_probe_override(run: dict, seeds, probe_ids) -> List[str]:
+    """Append the alloc.probe_id override a gradnorm run needs, if any.
+
+    Shared by the dry run and the real run on purpose. run_id hashes the fully resolved config
+    including alloc.probe_id, so a dry run that skipped this override reported run_ids that no real
+    run would ever produce -- making its SKIP/RUN resume column silently wrong for exactly the arms
+    that depend on the probe.
+
+    The run's seed is rotated across the available probe draws so the *allocation* is replicated
+    rather than fixed. With a single probe seed this reduces to the previous behaviour.
+    """
+    overrides = list(run["overrides"])
+    if run["condition"] in GRADNORM_STRATEGIES:
+        pseed = seeds[run["seed"] % len(seeds)]
+        probe_id = probe_ids.get((ALLOCATION_DRIVING_TASK, pseed))
+        if not probe_id:
+            raise AssertionError(
+                f"strategy={run['condition']!r} needs the {ALLOCATION_DRIVING_TASK} probe at "
+                f"seed={pseed}, which is not available"
+            )
+        overrides.append(f"alloc.probe_id={probe_id}")
+    return overrides
 
 
 def estimate_run_seconds(cfg: RunConfig, train: bool, per_step_seconds: float) -> float:
@@ -157,41 +205,49 @@ def main():
     spec = load_grid(args.grid)
     runs = expand_grid(spec, args.base_config)
     probe_tasks = needed_probe_tasks(spec, runs)
+    seeds_for_probes = probe_seeds(spec)
 
     if args.dry_run:
         per_step_seconds = load_calibration()
         probe_hours = 0.0
         base_cfg = from_yaml(args.base_config) if args.base_config else RunConfig()
         for task in probe_tasks:
-            probe_id = compute_probe_id(base_cfg.model_name, task, base_cfg.probe.rank, base_cfg.probe.steps, seed=0, split_seed=base_cfg.data.split_seed)
-            cached = (Path("results/probe") / f"{probe_id}.json").exists()
-            print(f"{probe_id}  probe:{task}  {'SKIP (cached)' if cached else 'RUN'}")
-            if not cached:
-                probe_hours += (base_cfg.probe.steps * per_step_seconds) / 3600.0
+            for pseed in seeds_for_probes:
+                probe_id = probe_id_for(base_cfg, task, pseed)
+                cached = (Path("results/probe") / f"{probe_id}.json").exists()
+                state = "SKIP (cached)" if cached else "RUN"
+                print(f"{probe_id}  probe:{task} seed={pseed}  {state}")
+                if not cached:
+                    probe_hours += (base_cfg.probe.steps * per_step_seconds) / 3600.0
 
         completed = existing_run_ids(RESULTS_CSV, exclude_statuses={"failed"})
+        dry_probe_ids = {
+            (task, pseed): probe_id_for(base_cfg, task, pseed)
+            for task in probe_tasks
+            for pseed in seeds_for_probes
+        }
         condition_hours = 0.0
         for r in runs:
-            cfg = resolve_config(args.base_config, r["overrides"])
+            cfg = resolve_config(args.base_config, with_probe_override(r, seeds_for_probes, dry_probe_ids))
             rid = compute_run_id(cfg)
             done = rid in completed
             print(f"{rid}  {r['condition']:16s} seed={r['seed']}  {'SKIP (done)' if done else 'RUN'}")
             if not done:
                 condition_hours += estimate_run_seconds(cfg, r["train"], per_step_seconds) / 3600.0
         total = probe_hours + condition_hours
-        print(f"\n{len(probe_tasks)} probe(s), {len(runs)} condition-runs; projected {total:.2f} GPU-hours for pending work")
+        n_probes = len(probe_tasks) * len(seeds_for_probes)
+        print(
+            f"\n{n_probes} probe(s) ({len(probe_tasks)} task(s) x {len(seeds_for_probes)} seed(s)), "
+            f"{len(runs)} condition-runs; projected {total:.2f} GPU-hours for pending work"
+        )
         return
 
-    probe_ids = run_probes(probe_tasks, args.base_config, args.device, dry_run=False)
-    gsm8k_probe_id = probe_ids.get(ALLOCATION_DRIVING_TASK)
+    probe_ids = run_probes(probe_tasks, seeds_for_probes, args.base_config, args.device, dry_run=False)
 
     completed = existing_run_ids(RESULTS_CSV, exclude_statuses={"failed"})
     hours_spent = 0.0
     for r in runs:
-        overrides = list(r["overrides"])
-        if r["condition"] in GRADNORM_STRATEGIES:
-            assert gsm8k_probe_id, f"strategy={r['condition']!r} needs the gsm8k probe, which failed to produce a probe_id"
-            overrides.append(f"alloc.probe_id={gsm8k_probe_id}")
+        overrides = with_probe_override(r, seeds_for_probes, probe_ids)
         cfg = resolve_config(args.base_config, overrides)
         rid = compute_run_id(cfg)
 

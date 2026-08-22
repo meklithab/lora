@@ -20,3 +20,9 @@ conditions:
 probes:
   - gsm8k
   - alpaca
+# Independent probe draws. run_grid.py rotates a run's seed across this list, so the *allocation*
+# becomes a replicated draw rather than one fixed vector re-measured by every seed. That matters
+# because the estimand ("does the probe->allocation procedure beat uniform?") has the allocation
+# draw as its statistical unit; with a single probe seed, gradnorm_prop has n=1 at the level of the
+# claim no matter how many training seeds are run. See README "Limitations" L1.
+probe_seeds: [0, 1, 2]
